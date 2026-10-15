@@ -24,8 +24,8 @@ jobs:
           set -euo pipefail
           for sdk in macosx iphoneos; do
             for unit in nvn_mtl.m hle_nvn.c; do
-              flags=()
-              if [[ "$sdk" = iphoneos ]]; then flags=(-arch arm64 -miphoneos-version-min=26.0); fi
+              flags=(-arch arm64)
+              if [[ "$sdk" = iphoneos ]]; then flags+=(-miphoneos-version-min=26.0); fi
               xcrun -sdk "$sdk" clang -isysroot "$(xcrun -sdk "$sdk" --show-sdk-path)" "${flags[@]}" -fobjc-arc -fsyntax-only -Wno-unused-function -Isource/dm/gfx/nvn/include -Isource/dm/host/gen/acnh -Isource/dm/games/acnh "source/dm/gfx/nvn/$unit" > "output/$sdk-$unit.log" 2>&1
               printf 'COMPILE_OK %s %s\n' "$sdk" "$unit"
             done
