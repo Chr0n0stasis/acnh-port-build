@@ -2,7 +2,7 @@
 // Exercise the real Apple zone database and public entry points with independently specified dates and offsets.
 #include "../hle_time.c"
 #include "../hle_time_zone.c"
-module_t g_mod[MAX_MOD]; int g_nmod;
+module_t g_mod[MAX_MOD]; int g_nmod; uint64_t now_ns(void) { return 0; }
 void *module_sym(module_t *m, const char *name) { (void)m; (void)name; return NULL; }
 static int checks;
 #define CHECK(x) do { if(!(x)) {fprintf(stderr,"FAIL line %d: %s\n",__LINE__,#x);return 1;} checks++; } while(0)
