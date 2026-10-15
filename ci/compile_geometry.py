@@ -8,7 +8,7 @@ inputs = root / 'geometry-probe'
 output = root / 'geometry-output'
 output.mkdir(exist_ok=True)
 results = []
-for path in sorted((inputs / 'msl').glob('*.metal')):
+for path in sorted([*(inputs / 'msl').glob('*.metal'), *(inputs / 'original-fragments').glob('*.metal')]):
     for sdk in ('macosx', 'iphoneos'):
         destination = output / sdk
         destination.mkdir(exist_ok=True)
@@ -33,3 +33,9 @@ report = dict(status='compile probe only; not integrated into the game renderer'
               attempts=len(results), results=results, gpu_devices=probe.stdout.strip(), gpu_probe_exit=probe.returncode)
 (output / 'report.json').write_text(json.dumps(report, indent=2))
 assert results and all(r['compiled'] for r in results), 'Apple shader compilation failed'
+subprocess.run(['clang', '-O1', '-fobjc-arc', '-fblocks', 'ci/test_geometry.m', '-framework', 'Foundation', '-framework', 'Metal', '-o', str(output / 'test_geometry')], check=True)
+gpu = subprocess.run([str(output / 'test_geometry'), str(inputs), str(output / 'macosx')], capture_output=True, text=True)
+(output / 'gpu-tests.log').write_text(gpu.stdout + gpu.stderr)
+report.update(gpu_test_exit=gpu.returncode, gpu_tests=gpu.stdout)
+(output / 'report.json').write_text(json.dumps(report, indent=2))
+assert gpu.returncode == 0, 'GPU geometry probe failed; see gpu-tests.log'
