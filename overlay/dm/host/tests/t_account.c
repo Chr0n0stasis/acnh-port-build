@@ -1,6 +1,9 @@
 // 用户枚举容量与跨接口身份一致性：使用真实宿主实现，不进入 Switch 服务。
 // Check enumeration bounds and identity consistency across the real host account interfaces.
 #include "../hle_account.c"
+// 装载器的模块表：acnh_install_olsc_stub 按 main 的构建号挑地址，单测里没有模块
+module_t g_mod[MAX_MOD];
+int g_nmod;
 void hle_signal_system_event(void *event) { (void)event; }
 static int checks;
 #define CHECK(x) do { if(!(x)) {fprintf(stderr,"FAIL line %d: %s\n",__LINE__,#x);return 1;} checks++; } while(0)

@@ -509,10 +509,10 @@ index 615d884..668b117 100644
  void *module_sym(module_t *m, const char *name);
  void *guest_sym(const char *name);
 diff --git a/dm/host/hle_account.c b/dm/host/hle_account.c
-index 6f3472b..b7cfdc7 100644
+index 6f3472b..56ad315 100644
 --- a/dm/host/hle_account.c
 +++ b/dm/host/hle_account.c
-@@ -12,7 +12,56 @@ _Static_assert(sizeof(Uid) == 16, "Uid");
+@@ -12,7 +12,62 @@ _Static_assert(sizeof(Uid) == 16, "Uid");
  static const Uid k_uid = {{0x78626c0000000001ull, 0x53574e4154495645ull}};   // 非零即有效 | Non-zero means valid
  #define HANDLE_MAGIC 0x55534552484e444cull                                    // "USERHNDL"
  
@@ -555,7 +555,13 @@ index 6f3472b..b7cfdc7 100644
 +
 +    const char *bid = dm_main_build();
 +    if (!strcmp(bid, "ff1d1c05670db6021c85b624a710b963")) {
-+        uint8_t *main_base = g_mod[0].base;
++        uint8_t *main_base = NULL;
++        for (int i = 0; i < g_nmod; i++) {
++            if (!strcmp(g_mod[i].name, "main")) {
++                main_base = g_mod[i].base;
++                break;
++            }
++        }
 +        if (main_base) {
 +            *(uint32_t *)(main_base + 0x4b3fbf4) = 1;
 +            *(uint64_t *)(main_base + 0x4b81c30) = (uint64_t)&s_olsc_service;
@@ -570,7 +576,7 @@ index 6f3472b..b7cfdc7 100644
  
  HLE_FORCE("_ZN2nn7account13ListOpenUsersEPiPNS0_3UidEi", "已打开用户列表；恒为本地用户 1 个", Result, h_acc_ListOpen, int *n, Uid *out, int max) {
      *n = 0;
-@@ -76,8 +125,15 @@ HLE_FORCE("_ZN2nn7account42NintendoAccountAuthorizationRequestContext10GetIdToke
+@@ -76,8 +131,15 @@ HLE_FORCE("_ZN2nn7account42NintendoAccountAuthorizationRequestContext10GetIdToke
  // ---------- Account interfaces used by newer SDKs: user enumeration / existence / profile image, the remaining AsyncContext members ----------
  HLE_FORCE("_ZN2nn7account12GetUserCountEPi", "用户数；恒为本地用户 1 个", Result, h_acc_UserCount, int *n) { *n = 1; return RES_OK; }
  HLE_FORCE("_ZN2nn7account18ListQualifiedUsersEPiPNS0_3UidEi", "可用用户列表；恒为本地用户 1 个", Result, h_acc_ListQual, int *n, Uid *out, int max) {
