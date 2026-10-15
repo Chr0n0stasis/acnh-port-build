@@ -14,6 +14,9 @@ modules	main subsdk0 sdk
 romfs_marker	Shader/Park_UBER_All.Nin_NX_NVN.szs
 zip_store	.zs:.szs:.bwav:.metallib
 present_interval	game
+# 触屏保留全部 Switch 输入：十字键、双摇杆及摇杆按下。
+# Expose all Switch inputs on the touchscreen: D-pad, both sticks and stick clicks.
+touch_full_gamepad	1
 # 来自该更新 control.nacp 的设备存档/日志初始容量及上限；宿主事务以 APFS 克隆实现，不建立 Switch 日志文件。
 # Initial/max device-save and journal capacities from this update's control.nacp; host transactions use APFS clones, not Switch journal files.
 device_save_size	0x6f00000
