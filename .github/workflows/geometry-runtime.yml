@@ -1,0 +1,39 @@
+name: ACNH geometry runtime compile
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  compile:
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare isolated renderer source
+        run: |
+          git clone -q https://github.com/seedds/smbw-mobile.git source
+          git -C source checkout -q 1b70789d001e289bbf23c5f8c38f0938caf5cdef
+          git -C source apply ../source.patch
+          cp -R overlay/. source/
+          cp -R geometry-runtime-source/. source/
+          mkdir -p source/dm/host/gen/acnh output
+          python3 source/dm/games/game.py header acnh source/dm/host/gen/acnh/game_profile.h
+      - name: Compile both renderer targets
+        shell: bash
+        run: |
+          set -euo pipefail
+          for sdk in macosx iphoneos; do
+            for unit in nvn_mtl.m hle_nvn.c; do
+              flags=()
+              if [[ "$sdk" = iphoneos ]]; then flags=(-arch arm64 -miphoneos-version-min=26.0); fi
+              xcrun -sdk "$sdk" clang -isysroot "$(xcrun -sdk "$sdk" --show-sdk-path)" "${flags[@]}" -fobjc-arc -fsyntax-only -Wno-unused-function -Isource/dm/gfx/nvn/include -Isource/dm/host/gen/acnh -Isource/dm/games/acnh "source/dm/gfx/nvn/$unit" > "output/$sdk-$unit.log" 2>&1
+              printf 'COMPILE_OK %s %s\n' "$sdk" "$unit"
+            done
+          done
+      - name: Upload compile diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: acnh-geometry-runtime-${{ github.run_number }}
+          path: output/
+          retention-days: 7
