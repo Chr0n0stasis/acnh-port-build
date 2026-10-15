@@ -467,6 +467,19 @@ index bea0206..48ba7bd 100644
      keys = {}
      # 第一遍：全部文件；Unity 资源包带类型树，顺手收下 Shader 的树。第二遍：没带类型树的 Unity 序列化文件借这些树再扫
      # First pass: every file; Unity bundles carry type trees, and the Shader trees are collected on the way. Second pass: Unity serialized files without type trees are scanned again with the borrowed trees
+diff --git a/dm/host/dm.h b/dm/host/dm.h
+index 615d884..9c8d182 100644
+--- a/dm/host/dm.h
++++ b/dm/host/dm.h
+@@ -19,7 +19,7 @@ typedef struct { uint8_t *d; size_t n; } dm_blob;   // 整份读进内存的一
+ #define ELF64_R_SYM(i) ((i) >> 32)
+ #define ELF64_R_TYPE(i) ((i) & 0xffffffff)
+ enum { DT_INIT = 12, DT_RELA = 7, DT_RELASZ = 8, DT_JMPREL = 23, DT_PLTRELSZ = 2, DT_SYMTAB = 6, DT_STRTAB = 5,
+-       DT_INIT_ARRAY = 25, DT_INIT_ARRAYSZ = 27 };
++       DT_INIT_ARRAY = 25, DT_INIT_ARRAYSZ = 27, DT_RELRSZ = 35, DT_RELR = 36, DT_RELRENT = 37 };
+ enum { R_AARCH64_ABS64 = 257, R_AARCH64_GLOB_DAT = 1025, R_AARCH64_JUMP_SLOT = 1026, R_AARCH64_RELATIVE = 1027 };
+ #define ELF64_ST_BIND(i) ((i) >> 4)            // 符号绑定：0 = STB_LOCAL | symbol binding: 0 = STB_LOCAL
+ #define ELF64_ST_VISIBILITY(o) ((o) & 3)       // 可见性：0 = STV_DEFAULT | visibility: 0 = STV_DEFAULT
 diff --git a/dm/host/hle_fs.c b/dm/host/hle_fs.c
 index d90aef6..4590b9b 100644
 --- a/dm/host/hle_fs.c
@@ -622,6 +635,95 @@ index 7547755..bcf059a 100644
          case I_SysResTotal: v = 0x2000000; break; case I_SysResUsed: v = 0x400000; break;
          case I_DebuggerAttached: v = 0; break;
          case I_RandomEntropy: { uint64_t dm_entropy64(void); v = dm_entropy64(); break; }   // DM_DETCLOCK 开时为确定流（hle_os.c） | a deterministic stream when DM_DETCLOCK is on (hle_os.c)
+diff --git a/dm/host/loader.c b/dm/host/loader.c
+index bb94f7a..71c6943 100644
+--- a/dm/host/loader.c
++++ b/dm/host/loader.c
+@@ -11,6 +11,7 @@
+ #include <mach-o/getsect.h>
+ #include <mach-o/ldsyms.h>
+ #include "hle.h"
++#include "dm_relr.h"
+ 
+ module_t g_mod[MAX_MOD];
+ int g_nmod;
+@@ -202,7 +203,36 @@ static void register_gates(module_t *m, const char *dir) {
+     LOG("%s: gates %d patch_off %#llx keys %lu/%lu/%lu/%lu", m->name, ng, m->patch_off, g_key18, g_keytls, g_keytlr, g_keygate);
+ }
+ 
++static const void *relr_table(module_t *m, size_t *bytes, uint64_t *offset) {
++    uint64_t at = 0, size = 0, ent = 0; unsigned seen = 0;
++    for (const Elf64_Dyn *d = m->dyn; d->d_tag; d++) switch (d->d_tag) {
++        case DT_RELR: at = d->d_un.d_ptr; seen |= 1; break;
++        case DT_RELRSZ: size = d->d_un.d_val; seen |= 2; break;
++        case DT_RELRENT: ent = d->d_un.d_val; seen |= 4; break;
++    }
++    *bytes = 0; *offset = at;
++    if (!seen) return NULL;
++    if (seen != 7 || ent != 8 || size % 8 || at > m->size || size > m->size - at)
++        die("【红】%s: RELR 表头非法 at=%#llx size=%#llx ent=%llu", m->name, at, size, ent);
++    *bytes = (size_t)size; return m->base + at;
++}
++
++static size_t relocate_relr(module_t *m) {
++    size_t bytes = 0, count = 0; uint64_t at, bad = 0;
++    relr_table(m, &bytes, &at);
++    // 禁止写签名代码、补丁/键页和重定位表；完整校验后才应用。
++    // Never write signed code, patch/key pages or the relocation table; apply only after full validation.
++    int error = dm_relr_relocate(m->base, m->size, at, bytes,
++                                (m->text_end + 0x3fff) & ~0x3fffull, m->patch_off,
++                                (uint64_t)(uintptr_t)m->base, &count, &bad);
++    if (error) die("【红】%s: RELR 校验/应用失败 error=%d offset=%#llx", m->name, error, bad);
++    return count;
++}
++
+ static void relocate(module_t *m) {
++    // ELF gABI 要求 RELR 先于 RELA；RELR 的加数保存在目标槽自身。
++    // ELF gABI requires RELR before RELA; a RELR addend is stored in the target slot itself.
++    size_t nrelr = relocate_relr(m);
+     uint64_t rela = 0, relasz = 0, jmprel = 0, pltsz = 0;
+     for (const Elf64_Dyn *d = m->dyn; d->d_tag; d++) switch (d->d_tag) {
+         case DT_RELA: rela = d->d_un.d_ptr; break;
+@@ -238,6 +268,7 @@ static void relocate(module_t *m) {
+             else { *where = v + r->r_addend; cnt[1]++; }       // ABS64 / GLOB_DAT
+         }
+     LOG("%s: reloc relative=%d abs/glob=%d jump=%d%s", m->name, cnt[0], cnt[1], cnt[2], nint ? "（含绑到先装模块的定义） | (some bound to an earlier module's definition)" : "");
++    if (nrelr) LOG("%s: RELR 已重定位 %zu 个模块内指针 | relocated module-local pointers", m->name, nrelr);
+     if (nint > 8) LOG("%s: 共 %d 处绑到先装模块的定义 | %d bound to an earlier module's definition in all", m->name, nint, nint);
+ }
+ 
+@@ -248,6 +279,16 @@ static void relocate(module_t *m) {
+ // Module base addresses and host ASLR differ every run, and only the values of the relocation slots change with them: copy the image and, using the same relocation table, replace every slot with an address-independent token --
+ // RELATIVE → (0, addend); symbol target falls in some module → (1 + module number, offset within the module); otherwise (host forced take-over / host symbol) → (name FNV, addend); all other bytes as is.
+ #include <CommonCrypto/CommonDigest.h>
++typedef struct { module_t *m; uint8_t *copy; CC_SHA256_CTX *hash; } relr_hash_context;
++static int relr_hash_slot(void *context, uint64_t offset) {
++    relr_hash_context *r = context;
++    if (r->copy) memset(r->copy + offset, 0, 8);
++    if (r->hash) {
++        uint64_t tail; memcpy(&tail, r->m->base + offset, 8); tail -= (uint64_t)(uintptr_t)r->m->base;
++        CC_SHA256_Update(r->hash, &tail, 8);
++    }
++    return 0;
++}
+ void loader_hash_log(void) {
+     if (!getenv("DM_LOADHASH")) return;
+     for (int k = 0; k < g_nmod; k++) {
+@@ -272,7 +313,14 @@ void loader_hash_log(void) {
+                 memcpy(cp + r->r_offset, &tok[0], 8);                // 槽 8 字节换成记号头；记号尾在下面按槽序追加 | The 8 slot bytes are replaced by the token head; the token tail is appended below in slot order
+                 nslot++;
+             }
++        size_t relr_bytes = 0, relr_count = 0; uint64_t relr_at;
++        const void *relr = relr_table(m, &relr_bytes, &relr_at);
++        relr_hash_context rh = {m, cp, NULL};
++        if (dm_relr_walk(relr, relr_bytes, m->size, relr_hash_slot, &rh, &relr_count)) die("%s: RELR hash walk", m->name);
++        nslot += (unsigned)relr_count;
+         CC_SHA256_CTX c; CC_SHA256_Init(&c); CC_SHA256_Update(&c, cp, (CC_LONG)m->size);
++        rh.copy = NULL; rh.hash = &c;
++        if (dm_relr_walk(relr, relr_bytes, m->size, relr_hash_slot, &rh, NULL)) die("%s: RELR hash tails", m->name);
+         for (int t = 0; t < 2; t++)                                // 记号尾（加数 / 偏移）按槽序追加，与槽头一起唯一确定槽值 | Token tails (addend / offset) are appended in slot order, and together with the slot head uniquely determine the slot value
+             for (uint64_t i = 0; i < sizes[t] / sizeof(Elf64_Rela); i++) {
+                 const Elf64_Rela *r = &tabs[t][i]; uint64_t tail = (uint64_t)r->r_addend;
 diff --git a/dm/host/tests/t_fs.c b/dm/host/tests/t_fs.c
 index 57de93d..393b68e 100644
 --- a/dm/host/tests/t_fs.c
