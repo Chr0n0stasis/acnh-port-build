@@ -441,6 +441,7 @@ static vis_list *vis_snapshot(void) {
 #define PEND_MAX 256
 static uint64_t g_pend_lo[PEND_MAX], g_pend_hi[PEND_MAX]; static int g_npend, g_pend_over;
 static int pend_hits(uint64_t a, uint64_t n) { if (g_pend_over) return 1; for (int i = 0; i < g_npend; i++) if (a < g_pend_hi[i] && a + n > g_pend_lo[i]) return 1; return 0; }
+static int g_predicate_gpu_writes;
 typedef struct { uint64_t ser; uint16_t level, slice; } zskip_zero;
 static zskip_zero g_zskip_zero[4096]; static int g_zskip_n, g_zskip_count;
 static zskip_zero g_zskip_cand[8]; static uint8_t g_zskip_cand_ok[8];
@@ -475,6 +476,25 @@ static void up_owner_check(const char *where) {
 // wait for the upload to complete after flushing it, and only then can the old queue read the upload result (mtl_read_texels waited first and flushed afterwards, the readback beat the upload, 4 failures on t_nvn upload content)
 static id<MTLCommandBuffer> q_cb(void) { if (on_sub_thread()) { up_flush(); while (atomic_load(&g_up_pending)) usleep(200); } return [g_q commandBuffer]; }
 static post_op *g_post; static int g_npost, g_postcap;
+// 已知的报告载荷按命令顺序前递给条件判断；时间戳字段和真正的查询结果仍等 GPU。
+// Forward known report payloads to predicates in command order; timestamps and actual query results still require the GPU.
+// 返回 1 已知值、0 CPU 内存值、-1 需要先完成本次提交。
+// Return 1 for a known value, 0 for CPU memory, -1 when the current submission must complete first.
+static int predicate_word(uint64_t addr, uint32_t *value) {
+    if (g_predicate_gpu_writes || pend_hits(addr, 4)) return -1;
+    for (int i = g_npost - 1; i >= 0; i--) {
+        const post_op *o = &g_post[i];
+        if (o->kind == 1 && addr == (uint64_t)(uintptr_t)o->val) {
+            if (o->mode != NVN_EVENT_SIGNAL_MODE_WRITE) return -1;
+            *value = o->v; return 1;
+        }
+        if ((o->kind == 2 || o->kind == 3) && addr >= o->addr && addr - o->addr < 16) {
+            if (o->kind == 3 || (addr - o->addr != 0 && addr - o->addr != 4)) return -1;
+            *value = 0; return 1;
+        }
+    }
+    return 0;
+}
 // 每次提交一个自动释放池：提交跑在客体线程上（长驻、无运行循环、从不排空隐式池），Metal 回放里自动释放的对象
 // （命令缓冲、编码器、通道描述等）不放池就永远不释放。iOS 真机选角页实测宿主堆每帧涨约 47 个对象、0.22 MiB/s。
 // One autorelease pool per submission: submissions run on a guest thread (long-lived, no run loop, never drains the implicit pool), so objects autoreleased in the Metal replay
@@ -513,7 +533,7 @@ void mtl_sub_begin(void) {
     // 上次提交槽用满时另建的溢出缓冲（见 g_vis_n >= VIS_SLOTS 那一处）：退役。原先这里直接置空，它留在驻留集里永远不放（取自 d2r-mobile 2eb575877）
     // The overflow buffer created when the previous submission ran out of slots (see g_vis_n >= VIS_SLOTS): retire it. It used to be just cleared here and stayed in the residency set for good (from d2r-mobile 2eb575877)
     if (g_vis && !vis_in_ring(g_vis)) defer_obj_release(g_vis);
-    g_npost = 0; g_vis = nil; g_vis_n = 0; g_vis_cur = -1; g_npend = 0; g_pend_over = 0;
+    g_npost = 0; g_vis = nil; g_vis_n = 0; g_vis_cur = -1; g_npend = 0; g_pend_over = 0; g_predicate_gpu_writes = 0;
     zskip_clear(); g_zskip_count = 0;
     int pick = -1;
     for (int i = 0; i < g_vis_ring_n; i++) if (g_vis_ring[i].fence <= g_done) { pick = i; break; }
@@ -806,7 +826,9 @@ uint64_t mtl_sub_commit(void) {
                 for (int k = 0; k < l->n; k++) { sum += ((const uint64_t *)((__bridge id<MTLBuffer>)l->s[k].buf).contents)[l->s[k].slot]; CFRelease(l->s[k].buf); }
                 free(l); uint64_t rec[2] = {sum, gpu_ticks()}; memcpy((void *)ops[i].addr, rec, sizeof rec);
             }
-            else { uint64_t t = gpu_ticks(), rec[2] = {ops[i].type == 0 || ops[i].type == 0x10 ? t : 0, t}; memcpy((void *)ops[i].addr, rec, sizeof rec); }
+            // 时间戳报告的载荷为零，时间戳在第二个字段。
+            // Timestamp reports carry a zero payload; the timestamp occupies the second word.
+            else { uint64_t t = gpu_ticks(), rec[2] = {0, t}; memcpy((void *)ops[i].addr, rec, sizeof rec); }
         }
         free(ops);
         pthread_mutex_lock(&g_mu); if (fence > g_done) g_done = fence; pthread_cond_broadcast(&g_cv); pthread_mutex_unlock(&g_mu);
@@ -5561,20 +5583,23 @@ void mtl_exec(const uint8_t *p) {
                 p_render_enable predicate = *(const p_render_enable *)a;
                 const p_render_enable *c = &predicate;
                 if (c->mode > NVN_CONDITIONAL_RENDER_MODE_RENDER_IF_NOT_EQUAL) MDIE("Unknown conditional render mode %u", c->mode);
-                // 先完成前面的命令及查询写回，再读两个相隔 16 字节的 32 位比较值。
-                // Complete prior commands and query writebacks before reading two 32-bit values 16 bytes apart.
-                // CPU 同步是 bring-up 实现；后续可以换 GPU 间接绘制来避免这次等待。
-                // This bring-up implementation synchronizes on the CPU; GPU indirect draws can remove the wait later.
-                uint64_t fence = mtl_sub_commit();
-                mtl_wait(fence, UINT64_MAX);
-                mtl_sub_begin(); args_dirty_all();
+                rp_flush();
+                uint32_t lhs = 0, rhs = 0;
+                int left = predicate_word(c->addr, &lhs), right = predicate_word(c->addr + 16, &rhs);
+                int sync = left < 0 || right < 0;
+                if (sync) {
+                    uint64_t fence = mtl_sub_commit();
+                    mtl_wait(fence, UINT64_MAX);
+                    mtl_sub_begin(); args_dirty_all();
+                } else if (!left || !right) mtl_finish_gpu();
                 void *buffer; uint64_t off;
                 if (!mtl_addr(c->addr, 20, &buffer, &off)) MDIE("Conditional render address is outside memory pools: %#llx", c->addr);
                 const uint8_t *mem = (const uint8_t *)((__bridge id<MTLBuffer>)buffer).contents + off;
-                uint32_t lhs, rhs; memcpy(&lhs, mem, 4); memcpy(&rhs, mem + 16, 4);
+                if (left <= 0) memcpy(&lhs, mem, 4);
+                if (right <= 0) memcpy(&rhs, mem + 16, 4);
                 render_enabled = c->mode == NVN_CONDITIONAL_RENDER_MODE_RENDER_IF_EQUAL ? lhs == rhs : lhs != rhs;
                 static int logged;
-                if (logged++ < 8) MLOG("Conditional render: mode=%u addr=%#llx values=%u,%u enabled=%d", c->mode, c->addr, lhs, rhs, render_enabled);
+                if (logged++ < 8) MLOG("Conditional render: mode=%u addr=%#llx values=%u,%u enabled=%d sync=%d", c->mode, c->addr, lhs, rhs, render_enabled, sync);
                 PD("E conditional cmd=%p mode=%u addr=%#llx lhs=%u rhs=%u enable=%d", p, c->mode, c->addr, lhs, rhs, render_enabled);
                 break;
             }
@@ -5663,10 +5688,10 @@ void mtl_exec(const uint8_t *p) {
             case OP_POLY_OFFSET: case OP_VIEWPORTS: case OP_DEPTH_RANGE: case OP_BLEND_COLOR: case OP_COPY_STRIDE: case OP_PRIMITIVE_RESTART:
                 state_op(h.op, a); break;
             case OP_COPY_B2T: copy_b2t(a); break;
-            case OP_COPY_T2B: copy_t2b(a); break;
+            case OP_COPY_T2B: copy_t2b(a); g_predicate_gpu_writes = 1; break;
             case OP_COPY_T2T: copy_t2t(a); break;
             case OP_CLEAR_TEX: clear_tex(a); break;
-            case OP_DISPATCH: dispatch(a); break;
+            case OP_DISPATCH: dispatch(a); g_predicate_gpu_writes = 1; break;
             case OP_BARRIER: case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: break;
             default: break;
         }

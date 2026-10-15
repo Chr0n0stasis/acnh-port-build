@@ -46,7 +46,7 @@ index 27d6045..e3e52dd 100644
      return '\n'.join(L)
  
 diff --git a/dm/gfx/nvn/hle_nvn.c b/dm/gfx/nvn/hle_nvn.c
-index b04b02c..e5ff710 100644
+index b04b02c..0c6d959 100644
 --- a/dm/gfx/nvn/hle_nvn.c
 +++ b/dm/gfx/nvn/hle_nvn.c
 @@ -20,6 +20,8 @@
@@ -78,6 +78,15 @@ index b04b02c..e5ff710 100644
      }
      OLOG("ProgramSetShaders %p n=%d data0=%#llx", (void *)p, n, n ? (unsigned long long)sd[0].data : 0ull);
      return 1;
+@@ -1043,7 +1047,7 @@ static void dump_frame(void) {
+     // 会把整机拖进内核崩溃，同机别的程序两次如此），或测试时用 DM_MEM_CAP_GB=<整数> 指定；玩家的 iOS 包不设上限（被系统杀之前自己退没有意义，反而多一种闪退）
+     // Every 300 frames read resident memory and hand it to the graphics layer to print the memory readout line (mtl_mem_stat, low frequency, capped). Memory watchdog: when resident memory exceeds the cap, log a failure and exit on its own. On by default only on the Mac host (24 GB: runaway host memory
+     // drags the whole machine into a kernel panic, which happened twice with other programs on the same machine), or set for tests with DM_MEM_CAP_GB=<integer>; the player's iOS app has no cap (exiting before the system kills it is pointless and only adds another kind of crash)
+-    if (g_frame % 300 == 0) { task_vm_info_data_t vi; mach_msg_type_number_t cnt = TASK_VM_INFO_COUNT;
++    if (g_frame % 300 == 0 || (g_frame < 300 && g_frame % 60 == 0)) { task_vm_info_data_t vi; mach_msg_type_number_t cnt = TASK_VM_INFO_COUNT;
+         if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &cnt) == KERN_SUCCESS) { unsigned long long mb = (unsigned long long)(vi.phys_footprint >> 20); void mtl_mem_stat(unsigned long long, unsigned long long); mtl_mem_stat(g_frame, mb);
+             static long cap = -1; if (cap < 0) { const char *e = getenv("DM_MEM_CAP_GB"); cap = e ? atol(e) : DM_MEM_CAP_DEFAULT_GB; }
+             if (cap > 0 && mb > (unsigned long long)cap * 1024) { LOG("【红】内存看门狗：常驻 %llu MB 超过上限 %ld GB（帧 %llu），自行退出", mb, cap, (unsigned long long)g_frame); _exit(86); } } }
 @@ -1545,10 +1549,10 @@ NVN(nvnCommandBufferReportValue, void, NVNcommandBuffer *c, uint32_t v, NVNbuffe
  // Clear a buffer to a 32-bit value: one OP_CLEAR_BUF record, filled in order within the submission at replay (fillBuffer when all bytes match, otherwise copied from a pattern buffer)
  NVN(nvnCommandBufferClearBuffer, void, NVNcommandBuffer *c, NVNbufferAddress a, size_t n, uint32_t v) { *REC(c, OP_CLEAR_BUF, p_clear_buf) = (p_clear_buf){a, n, v, 0}; }
@@ -94,10 +103,62 @@ index b04b02c..e5ff710 100644
  NVN(nvnCommandBufferSetLineWidth, void, NVNcommandBuffer *c, float w) { (void)c; if (w != 1.0f) ONCE_LOG("SetLineWidth %.2f：Metal 只有 1 像素线", w); }
  NVN(nvnCommandBufferSetPointSize, void, NVNcommandBuffer *c, float s) { (void)c; (void)s; ONCE_LOG("SetPointSize：点大小由着色器给"); }
 diff --git a/dm/gfx/nvn/nvn_mtl.m b/dm/gfx/nvn/nvn_mtl.m
-index 4818dc7..8dd1255 100644
+index 4818dc7..8ab6b62 100644
 --- a/dm/gfx/nvn/nvn_mtl.m
 +++ b/dm/gfx/nvn/nvn_mtl.m
-@@ -2163,7 +2163,7 @@ static int clear_rect_zero(int i) {
+@@ -440,6 +440,7 @@ static vis_list *vis_snapshot(void) {
+ #define PEND_MAX 256
+ static uint64_t g_pend_lo[PEND_MAX], g_pend_hi[PEND_MAX]; static int g_npend, g_pend_over;
+ static int pend_hits(uint64_t a, uint64_t n) { if (g_pend_over) return 1; for (int i = 0; i < g_npend; i++) if (a < g_pend_hi[i] && a + n > g_pend_lo[i]) return 1; return 0; }
++static int g_predicate_gpu_writes;
+ typedef struct { uint64_t ser; uint16_t level, slice; } zskip_zero;
+ static zskip_zero g_zskip_zero[4096]; static int g_zskip_n, g_zskip_count;
+ static zskip_zero g_zskip_cand[8]; static uint8_t g_zskip_cand_ok[8];
+@@ -474,6 +475,25 @@ static void up_owner_check(const char *where) {
+ // wait for the upload to complete after flushing it, and only then can the old queue read the upload result (mtl_read_texels waited first and flushed afterwards, the readback beat the upload, 4 failures on t_nvn upload content)
+ static id<MTLCommandBuffer> q_cb(void) { if (on_sub_thread()) { up_flush(); while (atomic_load(&g_up_pending)) usleep(200); } return [g_q commandBuffer]; }
+ static post_op *g_post; static int g_npost, g_postcap;
++// 已知的报告载荷按命令顺序前递给条件判断；时间戳字段和真正的查询结果仍等 GPU。
++// Forward known report payloads to predicates in command order; timestamps and actual query results still require the GPU.
++// 返回 1 已知值、0 CPU 内存值、-1 需要先完成本次提交。
++// Return 1 for a known value, 0 for CPU memory, -1 when the current submission must complete first.
++static int predicate_word(uint64_t addr, uint32_t *value) {
++    if (g_predicate_gpu_writes || pend_hits(addr, 4)) return -1;
++    for (int i = g_npost - 1; i >= 0; i--) {
++        const post_op *o = &g_post[i];
++        if (o->kind == 1 && addr == (uint64_t)(uintptr_t)o->val) {
++            if (o->mode != NVN_EVENT_SIGNAL_MODE_WRITE) return -1;
++            *value = o->v; return 1;
++        }
++        if ((o->kind == 2 || o->kind == 3) && addr >= o->addr && addr - o->addr < 16) {
++            if (o->kind == 3 || (addr - o->addr != 0 && addr - o->addr != 4)) return -1;
++            *value = 0; return 1;
++        }
++    }
++    return 0;
++}
+ // 每次提交一个自动释放池：提交跑在客体线程上（长驻、无运行循环、从不排空隐式池），Metal 回放里自动释放的对象
+ // （命令缓冲、编码器、通道描述等）不放池就永远不释放。iOS 真机选角页实测宿主堆每帧涨约 47 个对象、0.22 MiB/s。
+ // One autorelease pool per submission: submissions run on a guest thread (long-lived, no run loop, never drains the implicit pool), so objects autoreleased in the Metal replay
+@@ -512,7 +532,7 @@ void mtl_sub_begin(void) {
+     // 上次提交槽用满时另建的溢出缓冲（见 g_vis_n >= VIS_SLOTS 那一处）：退役。原先这里直接置空，它留在驻留集里永远不放（取自 d2r-mobile 2eb575877）
+     // The overflow buffer created when the previous submission ran out of slots (see g_vis_n >= VIS_SLOTS): retire it. It used to be just cleared here and stayed in the residency set for good (from d2r-mobile 2eb575877)
+     if (g_vis && !vis_in_ring(g_vis)) defer_obj_release(g_vis);
+-    g_npost = 0; g_vis = nil; g_vis_n = 0; g_vis_cur = -1; g_npend = 0; g_pend_over = 0;
++    g_npost = 0; g_vis = nil; g_vis_n = 0; g_vis_cur = -1; g_npend = 0; g_pend_over = 0; g_predicate_gpu_writes = 0;
+     zskip_clear(); g_zskip_count = 0;
+     int pick = -1;
+     for (int i = 0; i < g_vis_ring_n; i++) if (g_vis_ring[i].fence <= g_done) { pick = i; break; }
+@@ -805,7 +825,7 @@ uint64_t mtl_sub_commit(void) {
+                 for (int k = 0; k < l->n; k++) { sum += ((const uint64_t *)((__bridge id<MTLBuffer>)l->s[k].buf).contents)[l->s[k].slot]; CFRelease(l->s[k].buf); }
+                 free(l); uint64_t rec[2] = {sum, gpu_ticks()}; memcpy((void *)ops[i].addr, rec, sizeof rec);
+             }
+-            else { uint64_t t = gpu_ticks(), rec[2] = {ops[i].type == 0 || ops[i].type == 0x10 ? t : 0, t}; memcpy((void *)ops[i].addr, rec, sizeof rec); }
++            else { uint64_t t = gpu_ticks(), rec[2] = {0, t}; memcpy((void *)ops[i].addr, rec, sizeof rec); }
+         }
+         free(ops);
+         pthread_mutex_lock(&g_mu); if (fence > g_done) g_done = fence; pthread_cond_broadcast(&g_cv); pthread_mutex_unlock(&g_mu);
+@@ -2163,7 +2183,7 @@ static int clear_rect_zero(int i) {
  static pthread_mutex_t g_rmu = PTHREAD_MUTEX_INITIALIZER;
  // ---------- 着色器映射表：Switch 控制段哈希 → PC metallib（dm/gfx/tools/shader_map.py 产出） ----------
  // ---------- Shader mapping table: Switch control section hash → PC metallib (produced by dm/gfx/tools/shader_map.py) ----------
@@ -106,7 +167,7 @@ index 4818dc7..8dd1255 100644
  static NSString *g_shmap_path, *g_msl_dir;
  static NSString *exe_rel(const char *rel) {
      char buf[4096]; uint32_t n = sizeof buf;
-@@ -2446,7 +2446,7 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // 只在提
+@@ -2446,7 +2466,7 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // 只在提
              // DM_NVN_SHDUMP=directory: shaders missing from the map are saved as <key>.ctl (0x880-byte control section) and <key>.code (code area, length from control +0x704), to trace their source / add them to the map offline
              static const char *shd; static int shd_init; if (!shd_init) { shd = getenv("DM_NVN_SHDUMP"); shd_init = 1; }
              if (shd) { char path[1024]; FILE *f; uint32_t ncode; memcpy(&ncode, (const uint8_t *)p->sd[i].control + 0x704, 4);   // 设了 SHDUMP 时控制段是宿主留的副本 | with SHDUMP set the control section is the host's copy
@@ -115,7 +176,7 @@ index 4818dc7..8dd1255 100644
                  snprintf(path, sizeof path, "%s/%s.code", shd, k.UTF8String);
                  if (p->sd[i].data && ncode && ncode < (1u << 24) && (f = fopen(path, "wb"))) { fwrite((const void *)(uintptr_t)p->sd[i].data, 1, ncode, f); fclose(f); } }
              continue;
-@@ -3185,6 +3185,17 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
+@@ -3185,6 +3205,17 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
                      int base = DM_GAME_NVN_SSBO_BASE(nvn_stage);   // 游戏档案 nvn_ssbo_bases（马力欧：顶点 0x110、像素 0x510、计算 0x310） | game profile nvn_ssbo_bases (Mario: vertex 0x110, pixel 0x510, compute 0x310)
                      if (base < 0) RED_ONCE(45, "阶段 %d 的着色器读驱动段 c0，存储缓冲表基址未实测", nvn_stage);
                      else for (int r = 0; r < 16; r++) { uint64_t a = S.ssbo[nvn_stage][r].addr; uint32_t n = (uint32_t)S.ssbo[nvn_stage][r].size; memcpy(d + base + 16 * r, &a, 8); memcpy(d + base + 16 * r + 8, &n, 4); }
@@ -133,7 +194,7 @@ index 4818dc7..8dd1255 100644
                  } else {
                      for (int r = 0; r < DM_GAME_NVN_TEX_SLOTS; r++) { uint32_t th = (uint32_t)S.tex[nvn_stage][r]; memcpy(d + DM_GAME_NVN_TEX_BASE + 8 * r, &th, 4); }
                      for (int r = 0; r < DM_GAME_NVN_IMG_SLOTS; r++) { uint32_t ih = (uint32_t)S.img[nvn_stage][r]; memcpy(d + DM_GAME_NVN_IMG_BASE + 8 * r, &ih, 4); }   // 图像句柄表 0x120 + 8 r | image handle table 0x120 + 8 r   // 本作（NVN 55）贴图句柄表 0x20 + 8 r（dm/gfx/tools/dmsh_build.py TEX_BASE） | This game (NVN 55): texture handle table at 0x20 + 8 r (dm/gfx/tools/dmsh_build.py TEX_BASE)
-@@ -5500,6 +5511,7 @@ static int frz_op(unsigned op, const void *a) {   // 返回 1 = 这条操作不
+@@ -5500,6 +5531,7 @@ static int frz_op(unsigned op, const void *a) {   // 返回 1 = 这条操作不
  }
  
  void mtl_exec(const uint8_t *p) {
@@ -141,7 +202,7 @@ index 4818dc7..8dd1255 100644
      static int inited; if (!inited) { inited = 1; state_reset(); }
      static int dump_all = -1; if (dump_all < 0) dump_all = getenv("DM_NVN_PASSDUMP_ALL") != NULL;
      int trace = dump_all && passdump();   // 普通模式不逐操作查帧范围，完整命令位置仅用于指定诊断帧 | Normal mode does not check the frame range per operation; the full command position is only used for the designated diagnostic frames
-@@ -5517,7 +5529,39 @@ void mtl_exec(const uint8_t *p) {
+@@ -5517,7 +5549,42 @@ void mtl_exec(const uint8_t *p) {
          if (g_allocprof) { static uint64_t last; static int prev = -1; uint64_t now = g_dev.currentAllocatedSize; if (prev >= 0 && prev < 64 && now > last) g_ap_bytes[prev] += now - last; last = now; prev = h.op; }
          if (g_hoist_n && hoist_take(p)) { if (g_fz.active && p == g_fz.rt2_op) { g_fz.phase = 2; g_rt_merged = 0; PD("F %llu 合并通道进入后一个通道的绘制", g_stat_pass); } p += h.size; continue; }   // 已提前执行的纯清除通道 / 已并入的后一个通道开头   // 进入后一个通道：前一个通道的同目标续用到此为止，后一个通道读前一个通道附件由 fz_p2_draw 证本像素，不再按续用规则切开 | A pure-clear render pass already executed early / the start of a later pass already merged in   // Entering the later pass: the same-target continuation of the earlier pass ends here; the later pass reading the earlier pass's attachment is proven to be same-pixel by fz_p2_draw, and is no longer split by the continuation rule
          const void *a = p + 8;
@@ -161,26 +222,42 @@ index 4818dc7..8dd1255 100644
 +                p_render_enable predicate = *(const p_render_enable *)a;
 +                const p_render_enable *c = &predicate;
 +                if (c->mode > NVN_CONDITIONAL_RENDER_MODE_RENDER_IF_NOT_EQUAL) MDIE("Unknown conditional render mode %u", c->mode);
-+                // 先完成前面的命令及查询写回，再读两个相隔 16 字节的 32 位比较值。
-+                // Complete prior commands and query writebacks before reading two 32-bit values 16 bytes apart.
-+                // CPU 同步是 bring-up 实现；后续可以换 GPU 间接绘制来避免这次等待。
-+                // This bring-up implementation synchronizes on the CPU; GPU indirect draws can remove the wait later.
-+                uint64_t fence = mtl_sub_commit();
-+                mtl_wait(fence, UINT64_MAX);
-+                mtl_sub_begin(); args_dirty_all();
++                rp_flush();
++                uint32_t lhs = 0, rhs = 0;
++                int left = predicate_word(c->addr, &lhs), right = predicate_word(c->addr + 16, &rhs);
++                int sync = left < 0 || right < 0;
++                if (sync) {
++                    uint64_t fence = mtl_sub_commit();
++                    mtl_wait(fence, UINT64_MAX);
++                    mtl_sub_begin(); args_dirty_all();
++                } else if (!left || !right) mtl_finish_gpu();
 +                void *buffer; uint64_t off;
 +                if (!mtl_addr(c->addr, 20, &buffer, &off)) MDIE("Conditional render address is outside memory pools: %#llx", c->addr);
 +                const uint8_t *mem = (const uint8_t *)((__bridge id<MTLBuffer>)buffer).contents + off;
-+                uint32_t lhs, rhs; memcpy(&lhs, mem, 4); memcpy(&rhs, mem + 16, 4);
++                if (left <= 0) memcpy(&lhs, mem, 4);
++                if (right <= 0) memcpy(&rhs, mem + 16, 4);
 +                render_enabled = c->mode == NVN_CONDITIONAL_RENDER_MODE_RENDER_IF_EQUAL ? lhs == rhs : lhs != rhs;
 +                static int logged;
-+                if (logged++ < 8) MLOG("Conditional render: mode=%u addr=%#llx values=%u,%u enabled=%d", c->mode, c->addr, lhs, rhs, render_enabled);
++                if (logged++ < 8) MLOG("Conditional render: mode=%u addr=%#llx values=%u,%u enabled=%d sync=%d", c->mode, c->addr, lhs, rhs, render_enabled, sync);
 +                PD("E conditional cmd=%p mode=%u addr=%#llx lhs=%u rhs=%u enable=%d", p, c->mode, c->addr, lhs, rhs, render_enabled);
 +                break;
 +            }
              case OP_END: g_exec_cur = NULL;
                  if (g_hoist_n && !g_ret_n && !g_nrest) {
                      if (g_fz.active) fz_unskip();
+@@ -5603,10 +5670,10 @@ void mtl_exec(const uint8_t *p) {
+             case OP_POLY_OFFSET: case OP_VIEWPORTS: case OP_DEPTH_RANGE: case OP_BLEND_COLOR: case OP_COPY_STRIDE:
+                 state_op(h.op, a); break;
+             case OP_COPY_B2T: copy_b2t(a); break;
+-            case OP_COPY_T2B: copy_t2b(a); break;
++            case OP_COPY_T2B: copy_t2b(a); g_predicate_gpu_writes = 1; break;
+             case OP_COPY_T2T: copy_t2t(a); break;
+             case OP_CLEAR_TEX: clear_tex(a); break;
+-            case OP_DISPATCH: dispatch(a); break;
++            case OP_DISPATCH: dispatch(a); g_predicate_gpu_writes = 1; break;
+             case OP_BARRIER: case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: break;
+             default: break;
+         }
 diff --git a/dm/gfx/nvn/nvn_obj.h b/dm/gfx/nvn/nvn_obj.h
 index 58008d1..57df468 100644
 --- a/dm/gfx/nvn/nvn_obj.h
@@ -201,6 +278,20 @@ index 58008d1..57df468 100644
  typedef struct { float depth; int32_t depth_mask, stencil, stencil_mask; } p_clear_ds;
  typedef struct { int32_t first, n; float v[16][6]; } p_viewports;          // x, y, w, h, 近, 远（近远由 DEPTH_RANGE 覆盖） | x, y, w, h, near, far (near and far are overridden by DEPTH_RANGE)
  typedef struct { int32_t x, y, w, h; } p_scissor;
+diff --git a/dm/gfx/tests/t_nvn.c b/dm/gfx/tests/t_nvn.c
+index ef09e57..8a5454e 100644
+--- a/dm/gfx/tests/t_nvn.c
++++ b/dm/gfx/tests/t_nvn.c
+@@ -146,7 +146,8 @@ int main(void) {
+     EXPECT("事件值：h1(7,+5) h2 拷贝后再跑 h1(7,+5) = 12", 12, P(nvnEventGetValue)(&ev));
+     EXPECT("缓冲拷贝 64 B 全等", 0, memcmp(src, dst, 64));
+     uint64_t ts[2]; memcpy(ts, cnt, 16);
+-    EXPECT("计数器时间戳已写（非 0）", 1, ts[0] != 0 && ts[0] == ts[1]);
++    EXPECT("timestamp report payload is zero", 0, ts[0]);
++    EXPECT("timestamp report timestamp is nonzero", 1, ts[1] != 0);
+ 
+     // 5b. 同步必须挡住 CPU：先排 24 次 64 MiB 拷贝把 GPU 占住，最后一条把 src 拷到 dst；
+     //     等围栏返回后 CPU 才改写 src。若等待提前放行，最后那条拷贝会读到改写后的 src。
 diff --git a/dm/gfx/tools/dmsh_build.py b/dm/gfx/tools/dmsh_build.py
 index a3ca553..12631b4 100644
 --- a/dm/gfx/tools/dmsh_build.py
@@ -676,7 +767,7 @@ index 6f3472b..56ad315 100644
      *out = uid->v[0] == k_uid.v[0] && uid->v[1] == k_uid.v[1]; return RES_OK;
  }
 diff --git a/dm/host/hle_audren.c b/dm/host/hle_audren.c
-index c85df0c..4b1601f 100644
+index c85df0c..6df6d0f 100644
 --- a/dm/host/hle_audren.c
 +++ b/dm/host/hle_audren.c
 @@ -74,11 +74,15 @@ static void render_main(void *arg) {
@@ -720,7 +811,18 @@ index c85df0c..4b1601f 100644
              uint32_t nin = *(const uint32_t *)(c + 0x130); const int16_t *in = (const int16_t *)(c + 0x134);
              const int32_t *up = *(const int32_t *const *)(c + 0x128);
              if (!logged++) LOG("audren：DeviceSink 输入 %u 个（%d %d …）采样率 %u 每帧 %u 混音缓冲 %p 上采样缓冲 %p", nin, nin ? in[0] : -1, nin > 1 ? in[1] : -1, rate, samples, (void *)mix, (void *)up);
-@@ -153,7 +158,44 @@ static int capture(const uint8_t *cl, int16_t *dst) {
+@@ -142,7 +147,9 @@ static int capture(const uint8_t *cl, int16_t *dst) {
+                 dst[2 * s] = (int16_t)l; dst[2 * s + 1] = (int16_t)r; loud |= (uint64_t)(l | r);
+             }
+             atomic_fetch_add(&g_frames, 1); if (loud) atomic_fetch_add(&g_nonsilent, 1);
+-            uint64_t f = atomic_load(&g_frames); if (f == 200 || f % 12000 == 0) LOG("audren：已渲 %llu 帧，其中有声 %llu 帧", (unsigned long long)f, (unsigned long long)atomic_load(&g_nonsilent));
++            uint64_t f = atomic_load(&g_frames);
++            if (f == 200 || (f <= 6000 && f % 2000 == 0) || f % 12000 == 0)
++                LOG("audren: captured %llu frames, nonsilent %llu", (unsigned long long)f, (unsigned long long)atomic_load(&g_nonsilent));
+             return (int)samples;
+         }
+         c += size;
+@@ -153,7 +160,44 @@ static int capture(const uint8_t *cl, int16_t *dst) {
  // Render one frame (generate commands + CPU processing); dst = output (stereo int16, *nout samples). The two callers (render thread, catch-up) are serialized by a host lock: they share one command buffer
  static pthread_mutex_t g_render_mu = PTHREAD_MUTEX_INITIALIZER;
  static _Atomic uint64_t g_updates, g_renders, g_catchups;
@@ -765,7 +867,7 @@ index c85df0c..4b1601f 100644
      static int (*mode)(void *), (*device)(void *); static uint8_t *(*cbuf)(void *); static size_t (*cbsz)(void *), (*gen)(void *, void *, size_t);
      static void (*tmax)(void *, uint32_t), (*setup)(void *, const void *, size_t), (*process)(void *), (*lock)(void *), (*unlock)(void *);
      if (!process) {
-@@ -174,7 +216,7 @@ static Result render_once(uint8_t *sys, int16_t *dst, int *nout) {
+@@ -174,7 +218,7 @@ static Result render_once(uint8_t *sys, int16_t *dst, int *nout) {
      atomic_fetch_add(&g_renders, 1);
      uint64_t proc[16] __attribute__((aligned(16))) = {0};   // CommandListProcessor（0x58 字节）| CommandListProcessor (0x58 bytes)
      tmax(proc, 0xffffffffu); setup(proc, cl, n); process(proc);
@@ -774,7 +876,7 @@ index c85df0c..4b1601f 100644
      // 每帧渲染耗时（5 ms 一帧的预算）：每 2000 帧报均值 / 最大 | render time per frame (budget: 5 ms per frame): mean / max every 2000 frames
      static uint64_t sum, mx, cnt; uint64_t d = now_ns() - t0; sum += d; if (d > mx) mx = d;
      if (++cnt == 2000) { LOG("audren：渲染耗时 均 %.2f ms / 最大 %.2f ms（每帧 5 ms 预算，最近 2000 帧）；追帧累计 %llu 次", sum / 2000 / 1e6, mx / 1e6, (unsigned long long)atomic_load(&g_catchups)); sum = mx = cnt = 0; }
-@@ -184,6 +226,15 @@ static Result render_once(uint8_t *sys, int16_t *dst, int *nout) {
+@@ -184,6 +228,15 @@ static Result render_once(uint8_t *sys, int16_t *dst, int *nout) {
  HLE_FORCE("_ZN2nn5audio6server24AudioRendererManagerImpl17AudioRendererImpl29ExecuteAudioRendererRenderingEv", "手动渲染一帧：SDK 生成命令 + CPU 处理，宿主取 DeviceSink 输出",
            Result, h_ar_ImplExec, uint8_t *impl) { return render_once(impl + 0x60, g_frame, &g_frame_n); }   // AudioRendererImpl 里的 AudioRenderSystem 在 +0x60 | the AudioRenderSystem sits at +0x60 inside AudioRendererImpl
  
@@ -790,7 +892,7 @@ index c85df0c..4b1601f 100644
  // 两次 RequestUpdate 之间至少渲一帧。效果的「待初始化」只在游戏标「新加」的那次更新里置上（如 LightLimiterInfo::Update：isNew → 参数状态 0），
  // 下一次更新照游戏的值覆盖；中间没生成过命令，DSP 就永远收不到初始化，之后 ApplyLightLimiterEffect 读空指针。真机渲染器每 5 ms 自己出一帧、
  // 游戏又等渲染器事件，正常是一更新一帧；但开局游戏连着更新两次（相隔 0.04 ms），真出声时声卡打开慢、第一帧来得晚，两次之间没帧。
-@@ -206,7 +257,12 @@ HLE_FORCE("_ZN2nn5audio6server17AudioRenderSystem6UpdateEPvmS3_mPKvm", "渲染
+@@ -206,7 +259,12 @@ HLE_FORCE("_ZN2nn5audio6server17AudioRenderSystem6UpdateEPvmS3_mPKvm", "渲染
      }
      static int tr = -1; if (tr < 0) tr = getenv("DM_AUDREN_TRACE") != NULL;
      if (tr && u < 200) LOG("audren 更新 #%llu t=%.3f ms 距上次更新渲了 %llu 帧", (unsigned long long)u, now_ns() / 1e6, (unsigned long long)(atomic_load(&g_renders) - (last_r == ~0ull ? 0 : last_r)));
@@ -1010,7 +1112,7 @@ index 53ff6a3..085dc80 100644
  // nn::util::Uuid 16 bytes: a fixed local value (only used to tell devices apart locally, networking is cut)
  HLE_FORCE("_ZN2nn2oe17GetPseudoDeviceIdEPNS_4util4UuidE", "伪设备号；宿主固定值", void, h_oe_GetDevId, uint8_t *uuid) {
 diff --git a/dm/host/hle_sdk16.c b/dm/host/hle_sdk16.c
-index 3917a91..be3afde 100644
+index 3917a91..fe56579 100644
 --- a/dm/host/hle_sdk16.c
 +++ b/dm/host/hle_sdk16.c
 @@ -29,7 +29,8 @@ HLE_FORCE("_ZN2nn2oe24SetExpectedVolumeBalanceEff", "音量平衡；宿主忽略
@@ -1104,6 +1206,15 @@ index 3917a91..be3afde 100644
  // ---------- ec：商店小程序（升级到 Switch 2 版的页面）----------
  // 商店属排除范围：空操作。游戏不看返回值（两个重载都按无返回值处理）
  // ---------- ec: shop applet (the upgrade-to-Switch-2-Edition page) ----------
+@@ -143,7 +81,7 @@ static Result nfp_no_tag(const char *what) {
+     static _Atomic int logged; if (!atomic_exchange(&logged, 1)) LOG("nfp：%s 等要 amiibo 标签的操作 → 没找到标签（宿主无 NFC）", what);
+     return NFP_RES_TAG_NOT_FOUND;
+ }
+-HLE_FORCE("_ZN2nn3nfp10InitializeEv", "amiibo 库初始化；宿主一台 NFC 设备、永远找不到标签", void, h_nfp_Init, void) { LOG("nfp::Initialize：宿主一台 NFC 设备，找不到 amiibo 标签"); }
++HLE_FORCE("_ZN2nn3nfp10InitializeEv", "amiibo 库初始化；宿主一台 NFC 设备、永远找不到标签", void, h_nfp_Init, void) { static _Atomic int logged; if (!atomic_exchange(&logged, 1)) LOG("nfp::Initialize: one host NFC device, no tag present"); }
+ HLE_FORCE("_ZN2nn3nfp29AttachAvailabilityChangeEventEPNS_2os15SystemEventTypeE", "NFC 可用性变化事件；绑内核事件、恒不触发", void, h_nfp_AttachAvail, void *ev) { hle_bind_system_event(ev, 0); }
+ HLE_FORCE("_ZN2nn3nfp11ListDevicesEPNS0_12DeviceHandleEPii", "NFC 设备列表：一台", Result, h_nfp_List, NfpDeviceHandle *out, int *n, int max) {
+     *n = 0; if (max >= 1) { memset(&out[0], 0, sizeof out[0]); out[0].id = NFP_DEVICE_ID; *n = 1; }
 diff --git a/dm/host/hle_sdkinit.c b/dm/host/hle_sdkinit.c
 index 26afed1..b7cedd9 100644
 --- a/dm/host/hle_sdkinit.c
