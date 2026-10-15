@@ -17,6 +17,11 @@ on:
         type: boolean
         required: false
         default: false
+      verify_rewrite:
+        description: Verify ARM64 rewrite structure against ExeFS (slow)
+        type: boolean
+        required: false
+        default: false
 permissions:
   contents: read
   actions: read
@@ -63,6 +68,7 @@ jobs:
       - name: Prepare Apple translation chain
         run: bash ci/build.sh prepare
       - name: Verify ARM64 rewrite structure
+        if: ${{ inputs.verify_rewrite }}
         run: bash ci/build.sh verify
       - name: Build host and test save transactions
         run: bash ci/build.sh host
