@@ -67,6 +67,8 @@ phase_host() {
   cp source/dm/host/dmhost output/dmhost
   make -C source/dm/host/tests GAME=acnh build/t_fs > output/fs-build.log 2>&1
   source/dm/host/tests/build/t_fs > output/fs-test.log 2>&1
+  make -C source/dm/host/tests GAME=acnh build/t_fs_case > output/fs-case-build.log 2>&1
+  TMPDIR="$ROOT/work" source/dm/host/tests/build/t_fs_case > output/fs-case-test.log 2>&1
 
   clang -O1 -Wno-unused-function -Isource/dm/host/gen/acnh -Isource/dm/games/acnh source/dm/host/tests/t_fs_device.c -o work/t_fs_device > output/fs-device-build.log 2>&1
   work/t_fs_device > output/fs-device-test.log 2>&1

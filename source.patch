@@ -331,7 +331,7 @@ index bea0206..48ba7bd 100644
      # 第一遍：全部文件；Unity 资源包带类型树，顺手收下 Shader 的树。第二遍：没带类型树的 Unity 序列化文件借这些树再扫
      # First pass: every file; Unity bundles carry type trees, and the Shader trees are collected on the way. Second pass: Unity serialized files without type trees are scanned again with the borrowed trees
 diff --git a/dm/host/hle_fs.c b/dm/host/hle_fs.c
-index d90aef6..a664f85 100644
+index d90aef6..a338e0c 100644
 --- a/dm/host/hle_fs.c
 +++ b/dm/host/hle_fs.c
 @@ -480,12 +480,38 @@ HLE_FORCE("_ZN2nn2fs13MountSaveDataEPKcRKNS_7account3UidE", "fsp-srv；存档 
@@ -417,11 +417,60 @@ index d90aef6..a664f85 100644
  HLE_FORCE("_ZN2nn2fs7UnmountEPKc", "fsp-srv；挂载表常驻，卸载为空操作", void, h_fs_Unmount, const char *name) { (void)name; }
  
  // ---------- 文件 ----------
+@@ -720,9 +781,33 @@ static int rm_tree(const char *p) {
+ HLE_FORCE("_ZN2nn2fs26DeleteDirectoryRecursivelyEPKc", "fsp-srv → 递归删除（只在可写挂载内）", Result, h_fs_DeleteDirRec, const char *path) {
+     HP(path); RW(); return rm_tree(hp) ? err_res("rmtree", hp) : RES_OK;
+ }
+-HLE_FORCE("_ZN2nn2fs10RenameFileEPKcS2_", "fsp-srv → rename(2)", Result, h_fs_RenameFile, const char *from, const char *to) {
++HLE_FORCE("_ZN2nn2fs25CleanDirectoryRecursivelyEPKc", "fsp-srv；递归清空子项，保留目录与事务扩展属性", Result, h_fs_CleanDirRec, const char *path) {
++    HP(path); RW();
++    DIR *dir = opendir(hp); if (!dir) return err_res("clean opendir", hp);
++    int error = 0;
++    for (;;) {
++        errno = 0; struct dirent *entry = readdir(dir);
++        if (!entry) { error = errno; break; }
++        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
++        char child[1400];
++        if (snprintf(child, sizeof child, "%s/%s", hp, entry->d_name) >= (int)sizeof child) { error = ENAMETOOLONG; break; }
++        if (rm_tree(child)) { error = errno ? errno : EIO; break; }
++    }
++    if (closedir(dir) && !error) error = errno;
++    if (error) { if (in_txn_dir(hp)) save_poison(error); errno = error; return err_res("clean", hp); }
++    return RES_OK;
++}
++static Result fs_rename(const char *from, const char *to, int directory) {
++    if (!from || !to) return RES_FAIL;
++    // 不允许跨挂载改名：否则可能把事务工作文件移出可回滚的目录。
++    // Reject cross-mount renames, which could move transaction files outside the rollback directory.
++    const char *fc = strchr(from, ':'), *tc = strchr(to, ':');
++    if (!fc || !tc || fc - from != tc - to || strncmp(from, to, (size_t)(fc - from))) return RES_FAIL;
+     HP(from); RW(); char hp2[1024];
+-    if (!host_path_ex(to, hp2, sizeof hp2, NULL, 1)) return err_res("rename path", to);
++    if (directory) { struct stat st; if (lstat(hp, &st)) return err_res("rename stat", hp); if (!S_ISDIR(st.st_mode)) return RES_PATH_NOT_FOUND; }
++    int target_ro = 0;
++    if (!host_path_ex(to, hp2, sizeof hp2, &target_ro, 1)) return err_res("rename path", to);
++    if (target_ro) return RES_FAIL;
+     if (!access(hp2, F_OK)) return RES_PATH_EXISTS;
+     if (rename(hp, hp2)) return err_res("rename", hp);
+     if (dm_fs_test_fail("guestname") || set_guest_name(hp2, to)) { int e = errno ? errno : EIO;
+@@ -731,6 +816,12 @@ HLE_FORCE("_ZN2nn2fs10RenameFileEPKcS2_", "fsp-srv → rename(2)", Result, h_fs_
+         errno = e; return err_res("rename name", hp2); }
+     return RES_OK;
+ }
++HLE_FORCE("_ZN2nn2fs10RenameFileEPKcS2_", "fsp-srv → rename(2)", Result, h_fs_RenameFile, const char *from, const char *to) {
++    return fs_rename(from, to, 0);
++}
++HLE_FORCE("_ZN2nn2fs15RenameDirectoryEPKcS2_", "fsp-srv；目录改名及名称元数据回退共用文件系统实现", Result, h_fs_RenameDirectory, const char *from, const char *to) {
++    return fs_rename(from, to, 1);
++}
+ HLE_FORCE("_ZN2nn2fs12GetEntryTypeEPNS0_18DirectoryEntryTypeEPKc", "fsp-srv → stat(2)", Result, h_fs_GetEntryType, int32_t *out, const char *path) {
+     HP(path); struct stat st;
+     if (stat(hp, &st)) return err_res("stat", hp);
 diff --git a/dm/host/tests/t_fs.c b/dm/host/tests/t_fs.c
-index 57de93d..fb9bdab 100644
+index 57de93d..393b68e 100644
 --- a/dm/host/tests/t_fs.c
 +++ b/dm/host/tests/t_fs.c
-@@ -183,6 +183,46 @@ int main(void) {
+@@ -183,6 +183,55 @@ int main(void) {
      snprintf(p, sizeof p, "%s/a", save); CHECK(same(p, "ok3"), "已提交 a = ok3");
  
  
@@ -464,6 +513,15 @@ index 57de93d..fb9bdab 100644
 +    CHECK(mount_ex("second", other, 0, 1) == RES_OK, "建立独立存档事务目录用于失败检查");
 +    const char *two_groups[] = {"island", "second"};
 +    CHECK(write_save("island:/a", "pending") == RES_OK && h_fs_CommitGroup(two_groups, 2) != RES_OK && same(p, "group"), "跨独立目录未支持时不进行部分提交");
++    CHECK(h_fs_CreateDirectory("island:/nested") == RES_OK && h_fs_CreateFile("island:/nested/content", 0) == RES_OK && write_save("island:/nested/content", "kept") == RES_OK, "建立目录改名测试内容");
++    CHECK(h_fs_RenameDirectory("island:/nested", "island:/renamed") == RES_OK && read_fs("island:/renamed/content", island_got, sizeof island_got) && !strcmp(island_got, "kept"), "目录改名保留子项及内容");
++    CHECK(h_fs_RenameDirectory("island:/a", "island:/not-a-directory") != RES_OK && read_fs("island:/a", island_got, sizeof island_got), "目录改名拒绝普通文件，源文件保留");
++    CHECK(h_fs_RenameDirectory("island:/renamed", "second:/renamed") != RES_OK && read_fs("island:/renamed/content", island_got, sizeof island_got), "拒绝把事务目录改名移出挂载");
++    CHECK(h_fs_CreateDirectory("island:/renamed/deeper") == RES_OK && h_fs_CreateFile("island:/renamed/deeper/file", 0) == RES_OK, "建立递归清空的深层子项");
++    CHECK(h_fs_CleanDirRec("island:/renamed") == RES_OK, "递归清空目录成功");
++    int32_t cleaned_type = -1;
++    CHECK(h_fs_GetEntryType(&cleaned_type, "island:/renamed") == RES_OK && cleaned_type == ENT_DIR && h_fs_GetEntryType(&cleaned_type, "island:/renamed/content") != RES_OK && h_fs_GetEntryType(&cleaned_type, "island:/renamed/deeper") != RES_OK, "清空后父目录保留，所有子项消失");
++    CHECK(h_fs_CleanDirRec("island:/missing-dir") != RES_OK && same(p, "group"), "不存在的目录清空失败，已提交存档不变");
 +
      // 语言开关改写设置文件（settings_lang_apply）：期望值按规则手算——只在「与开关不符」时把 Language / VoiceLanguage 改成 0（英文）或 8（简中），别的键和别的语言不动
      // Language switch rewriting the settings file (settings_lang_apply): expected values computed by hand from the rule -- only when it "does not match the switch" are Language / VoiceLanguage changed to 0 (English) or 8 (Simplified Chinese); other keys and other languages are untouched
