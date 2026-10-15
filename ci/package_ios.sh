@@ -20,5 +20,5 @@ xcodebuild -project DmIOS.xcodeproj -scheme DmIOS -configuration Release -destin
 mkdir -p "$ROOT/output/Payload"
 cp -R "$ROOT/work/dd/Build/Products/Release-iphoneos/DmIOS.app" "$ROOT/output/Payload/"
 cd "$ROOT/output"
-zip -qry ACNHMobile-thin-unsigned.ipa Payload
-printf 'Experimental unsigned IPA. Complete RomFS must be placed in Documents/romfs. No device run has been verified.\n' > IPA-STATUS.txt
+zip -qry ACNHMobile-bringup-unsigned.ipa Payload
+printf 'Experimental bring-up IPA, not a complete or verified playable port. Eight geometry shaders remain unsupported; see BRINGUP-LIMITATIONS.json. Complete RomFS must be placed in Documents/romfs. No device run has been verified.\n' > IPA-STATUS.txt

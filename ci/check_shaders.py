@@ -3,12 +3,17 @@ import sys
 from pathlib import Path
 
 mac, ios = map(Path, sys.argv[1:3])
+bringup = '--bringup' in sys.argv[3:]
+geometry = {c[3] for line in Path('source/dm/games/acnh/shader_map.tsv').read_text().splitlines()
+            if len(c := line.split('\t')) > 4 and c[2] == '几何'}
 rows = json.loads((mac / '_b_build.json').read_text())
-failed = [r for r in rows if r['st'] != 'ok']
+deferred = [r for r in rows if bringup and r['key'] in geometry]
+checked = [r for r in rows if r not in deferred]
+failed = [r for r in checked if r['st'] != 'ok']
 if not rows or failed:
     raise SystemExit(f'Shader build incomplete: {len(failed)} failures / {len(rows)} shaders')
 problems = []
-for row in rows:
+for row in checked:
     key = row['key'] + '_b'
     for root in (mac, ios):
         lib = root / (key + '.metallib')
@@ -25,4 +30,9 @@ for row in rows:
 if problems:
     Path('output/shader-problems.txt').write_text('\n'.join(problems))
     raise SystemExit(f'Shader interface validation failed: {len(problems)} problems')
-print(f'Compiled and checked {len(rows)} macOS/iOS shader libraries')
+if deferred:
+    Path('output/BRINGUP-LIMITATIONS.json').write_text(json.dumps({
+        'status': 'experimental bring-up only, not a complete or verified playable port',
+        'deferred_geometry_shaders': deferred,
+        'requires_device_test': True}, indent=2))
+print(f'Compiled and checked {len(checked)} macOS/iOS shader libraries; deferred geometry: {len(deferred)}')

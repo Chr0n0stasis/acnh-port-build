@@ -30,5 +30,11 @@ nvn_samp_base	0x568
 nvn_img_base	0x120
 nvn_img_slots	8
 nvn_ssbo_bases	vs=0x110 ps=0x510 cs=0x310
+# 计算着色器全局内存辅助函数从 c0+0x210 的 uniform 地址/长度表取边界。
+# Compute global-memory helpers read uniform addresses and bounds from c0+0x210.
+nvn_ubo_bases	cs=0x210
+# 三个 Park_Proc 顶点程序从 c0+0x610.x 读取点大小上限；宿主映射到 Metal 的 511 像素限制。
+# Three Park_Proc vertex programs read the point-size cap at c0+0x610.x; map it to Metal's 511-pixel limit.
+nvn_c0_point_max	vs=0x610
 shader_groups	/Shader/Park_UBER=park /Shader/=engine /Effect/=effect /Layout/=layout /Model/=model
 shader_note	动森 3.0.3 着色器

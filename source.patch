@@ -1,11 +1,26 @@
 diff --git a/dm/games/game.py b/dm/games/game.py
-index 27d6045..0df0392 100644
+index 27d6045..1836b61 100644
 --- a/dm/games/game.py
 +++ b/dm/games/game.py
-@@ -84,6 +84,7 @@ def header(g):
+@@ -68,6 +68,12 @@ def header(g):
+     mods = g.words('modules')
+     ssbo = dict(g.pairs('nvn_ssbo_bases'))
+     sb = ' : '.join(f'(stage) == {STAGES[k]} ? {v}' for k, v in ssbo.items()) + ' : -1'
++    ubo = dict(tuple(w.split('=', 1)) for w in g.get('nvn_ubo_bases', '').split())
++    ub = ' : '.join(f'(stage) == {STAGES[k]} ? {v}' for k, v in ubo.items())
++    ub = ub + ' : -1' if ub else '-1'
++    point = dict(tuple(w.split('=', 1)) for w in g.get('nvn_c0_point_max', '').split())
++    pm = ' : '.join(f'(stage) == {STAGES[k]} ? {v}' for k, v in point.items())
++    pm = pm + ' : -1' if pm else '-1'
+     vers = ', '.join('{' + q(b['main']) + ', ' + q(b['display']) + '}' for b in g.builds().values() if 'main' in b)
+     pi = g.get('present_interval', 'game')   # 出图间隔：game = 按游戏设的（同 Switch），display = 每个显示节拍一帧 | present interval: game = as the game sets it (as on the Switch), display = one frame per display tick
+     if pi not in ('game', 'display'): sys.exit(f'{g.id}: present_interval 只能是 game / display | present_interval must be game or display: {pi}')
+@@ -84,6 +90,9 @@ def header(g):
           f'#define DM_GAME_MEM_STACK {g.int("mem_stack"):#x}ull',
           f'#define DM_GAME_APP_POOL {g.int("app_pool"):#x}ull',
           f'#define DM_GAME_NVN_SSBO_BASE(stage) ({sb})',
++         f'#define DM_GAME_NVN_UBO_BASE(stage) ({ub})',
++         f'#define DM_GAME_NVN_POINT_MAX_OFF(stage) ({pm})',
 +         f'#define DM_GAME_NVN_CTL_HASH_BYTES {int(g.get("nvn_ctl_hash_bytes", "0x880"), 0):#x}',
           f'#define DM_GAME_NVN_TEX_BASE {g.int("nvn_tex_base"):#x}',
           f'#define DM_GAME_NVN_TEX_SLOTS {g.int("nvn_tex_slots")}',
@@ -44,9 +59,18 @@ index b04b02c..b0818f4 100644
      OLOG("ProgramSetShaders %p n=%d data0=%#llx", (void *)p, n, n ? (unsigned long long)sd[0].data : 0ull);
      return 1;
 diff --git a/dm/gfx/nvn/nvn_mtl.m b/dm/gfx/nvn/nvn_mtl.m
-index 4818dc7..e2c73ee 100644
+index 4818dc7..051983a 100644
 --- a/dm/gfx/nvn/nvn_mtl.m
 +++ b/dm/gfx/nvn/nvn_mtl.m
+@@ -2163,7 +2163,7 @@ static int clear_rect_zero(int i) {
+ static pthread_mutex_t g_rmu = PTHREAD_MUTEX_INITIALIZER;
+ // ---------- 着色器映射表：Switch 控制段哈希 → PC metallib（dm/gfx/tools/shader_map.py 产出） ----------
+ // ---------- Shader mapping table: Switch control section hash → PC metallib (produced by dm/gfx/tools/shader_map.py) ----------
+-static NSMutableDictionary<NSString *, NSArray *> *g_shmap;
++static NSMutableDictionary<NSString *, NSString *> *g_shmap;
+ static NSString *g_shmap_path, *g_msl_dir;
+ static NSString *exe_rel(const char *rel) {
+     char buf[4096]; uint32_t n = sizeof buf;
 @@ -2446,7 +2446,7 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // 只在提
              // DM_NVN_SHDUMP=directory: shaders missing from the map are saved as <key>.ctl (0x880-byte control section) and <key>.code (code area, length from control +0x704), to trace their source / add them to the map offline
              static const char *shd; static int shd_init; if (!shd_init) { shd = getenv("DM_NVN_SHDUMP"); shd_init = 1; }
@@ -56,6 +80,97 @@ index 4818dc7..e2c73ee 100644
                  snprintf(path, sizeof path, "%s/%s.code", shd, k.UTF8String);
                  if (p->sd[i].data && ncode && ncode < (1u << 24) && (f = fopen(path, "wb"))) { fwrite((const void *)(uintptr_t)p->sd[i].data, 1, ncode, f); fclose(f); } }
              continue;
+@@ -3185,6 +3185,17 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
+                     int base = DM_GAME_NVN_SSBO_BASE(nvn_stage);   // 游戏档案 nvn_ssbo_bases（马力欧：顶点 0x110、像素 0x510、计算 0x310） | game profile nvn_ssbo_bases (Mario: vertex 0x110, pixel 0x510, compute 0x310)
+                     if (base < 0) RED_ONCE(45, "阶段 %d 的着色器读驱动段 c0，存储缓冲表基址未实测", nvn_stage);
+                     else for (int r = 0; r < 16; r++) { uint64_t a = S.ssbo[nvn_stage][r].addr; uint32_t n = (uint32_t)S.ssbo[nvn_stage][r].size; memcpy(d + base + 16 * r, &a, 8); memcpy(d + base + 16 * r + 8, &n, 4); }
++                    // 动森计算辅助函数还从 uniform 描述符读取地址和长度，用于全局内存访问边界检查。
++                    // ACNH compute helpers also read uniform addresses and lengths for global-memory bounds checks.
++                    int ub = DM_GAME_NVN_UBO_BASE(nvn_stage);
++                    if (ub >= 0 && ub + 0x100 <= 0xA00) for (int r = 0; r < 16; r++) {
++                        uint64_t a = S.ubo[nvn_stage][r].addr; uint32_t n = (uint32_t)S.ubo[nvn_stage][r].size;
++                        memcpy(d + ub + 16 * r, &a, 8); memcpy(d + ub + 16 * r + 8, &n, 4);
++                    }
++                    // 原程序用该字段限制 gl_PointSize；Apple Metal Feature Set Tables 的点图元上限为 511 像素。
++                    // The original program clamps gl_PointSize with this field; Apple's Metal Feature Set Tables cap points at 511 pixels.
++                    int pm = DM_GAME_NVN_POINT_MAX_OFF(nvn_stage);
++                    if (pm >= 0 && pm + 16 <= 0xA00) { float limit = 511.0f; memcpy(d + pm, &limit, 4); }
+                 } else {
+                     for (int r = 0; r < DM_GAME_NVN_TEX_SLOTS; r++) { uint32_t th = (uint32_t)S.tex[nvn_stage][r]; memcpy(d + DM_GAME_NVN_TEX_BASE + 8 * r, &th, 4); }
+                     for (int r = 0; r < DM_GAME_NVN_IMG_SLOTS; r++) { uint32_t ih = (uint32_t)S.img[nvn_stage][r]; memcpy(d + DM_GAME_NVN_IMG_BASE + 8 * r, &ih, 4); }   // 图像句柄表 0x120 + 8 r | image handle table 0x120 + 8 r   // 本作（NVN 55）贴图句柄表 0x20 + 8 r（dm/gfx/tools/dmsh_build.py TEX_BASE） | This game (NVN 55): texture handle table at 0x20 + 8 r (dm/gfx/tools/dmsh_build.py TEX_BASE)
+diff --git a/dm/gfx/tools/dmsh_build.py b/dm/gfx/tools/dmsh_build.py
+index a3ca553..d5f7310 100644
+--- a/dm/gfx/tools/dmsh_build.py
++++ b/dm/gfx/tools/dmsh_build.py
+@@ -15,6 +15,7 @@
+ # Build output: <key>_b.metallib, <key>_b.json (replay reflection, including drv_reads, the runtime read offsets into driver segments c0 / c2), <key>_b.metal (MSL)
+ # Environment IOSOUT=dir: the same MSL also goes through dm/ios/tools/ios_metal.compile to produce an iphoneos metallib + reflection (chain_metal records the iOS compile convention)
+ # Final summary: success / failure counts and the distribution of reasons; distribution of driver segment read offsets (those outside the range the replay layer can fill are listed separately)
++import shader_driver
+ import ast, inspect, os, re, sys, json, struct, hashlib, shutil, subprocess, tempfile, collections, threading, concurrent.futures as cf
+ DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # 工作区根目录（游戏文件、产物、运行现场都在它下面） | Workspace root (game files, build outputs and run artifacts are all under it)
+ HOME = os.path.expanduser('~')
+@@ -397,26 +398,18 @@ DRV_FILL = {0: [(b, b + 0x100) for b in sorted(SSBO.values())],   # c0：存储
+ # c2: texture handle table (Mario 0x20 + 8 r, 32 slots; Engage 0x168 + 8 r, 128 slots), image handle table (0x120 + 8 r, 8 slots), separate sampler handle table (0x568 + 8 r, 128 slots; the replay layer fills them all)
+ 
+ def drv_reads(src):
+-    """MSL 里对驱动段 c0 / c2 的读取：常量下标 → 字节区间；非常量下标记为动态 | Reads of driver segments c0 / c2 in the MSL: constant index → byte range; non-constant indices are recorded as dynamic"""
+-    out = {}
+-    for bank in (0, 2):
+-        offs, dyn = set(), False
+-        for m in re.finditer(r'fp_c%d\)\._m0\[([^\]]+)\]' % bank, src):
+-            idx = m.group(1).rstrip('u')
+-            if idx.isdigit(): offs.add(int(idx) * 16)
+-            else: dyn = True
+-        if offs or dyn: out[str(bank)] = {'vec4_offsets': sorted(offs), 'dynamic': dyn}
+-    return out
+-
+-def unfillable(dr):
+-    bad = []
+-    for bank, d in dr.items():
+-        if d['dynamic']: bad.append(f'c{bank} 动态下标')
+-        for o in d['vec4_offsets']:
+-            # 读的是 16 字节一行：与任一张表相交即可（Engage 读 c2+0x160 那一行，是为了其中 0x168 的贴图槽 0）
+-            # a read is a 16-byte row: overlapping any table is enough (Engage reads the c2+0x160 row for texture slot 0 at 0x168 in it)
+-            if not any(o < b and a < o + 16 for a, b in DRV_FILL[int(bank)]): bad.append(f'c{bank}+{o:#x}')
+-    return bad
++    return shader_driver.reads(src)
++
++def unfillable(dr, stage):
++    # 只承认本阶段实际填充的表，不能借其他阶段的地址区间通过检查。
++    # Only tables filled for this stage count; another stage's ranges cannot satisfy the check.
++    ubo = {k: int(v, 0) for k, v in (w.split('=', 1) for w in GAME.get('nvn_ubo_bases', '').split())}
++    ranges = {2: DRV_FILL[2], 0: []}
++    for table in (SSBO, ubo):
++        if stage in table: ranges[0].append((table[stage], table[stage] + 0x100))
++    point = {k: int(v, 0) for k, v in (w.split('=', 1) for w in GAME.get('nvn_c0_point_max', '').split())}
++    if stage in point: ranges[0].append((point[stage], point[stage] + 16))
++    return shader_driver.unfilled(dr, ranges)
+ 
+ RULES = []   # 按着色器名挂的 MSL 改写规则（函数, 适用判定）；原有的暗部重映射 toe 已删（回到 Switch 原版亮度） | MSL rewrite rules attached by shader name (function, applicability test); the former dark-range remap toe has been removed (back to the original Switch brightness)
+ # 第一段代码指纹不包含 dmsh_fetch.py；可读 tile 变体单独按生成 MSL 做第二段缓存。
+@@ -518,7 +511,7 @@ def finish(key, w, j, c1):
+     dr = drv_reads(src)
+     refl = {'key': key + '_b', 'route': 'B', 'chain': CHAIN, 'dm_ctl': key, 'source': f'{name}#{k}', 'pc_paired': pc_of[key], 'stage': j['stage'],
+             'entry': entry.group(2) if entry else 'main0', 'msl_entry_kind': entry.group(1) if entry else None,
+-            'threadgroup_size': j.get('local'), 'c1': c1.hex(), 'notes': res['notes'] + (['无配对 PC 反射，查询按缺省'] if j.get('pc_missing') else []), 'drv_reads': dr, 'drv_unfillable': unfillable(dr),
++            'threadgroup_size': j.get('local'), 'c1': c1.hex(), 'notes': res['notes'] + (['无配对 PC 反射，查询按缺省'] if j.get('pc_missing') else []), 'drv_reads': dr, 'drv_unfillable': unfillable(dr, j['stage']),
+             'bindings': reflect(key, j['stage'], src, res),
+             'vertex_inputs': [{'location': int(m.group(2)), 'msl_type': m.group(1)} for m in re.finditer(r'(\w+)\s+\w+\s*\[\[attribute\((\d+)\)\]\]', src)],
+             'raster': raster_facts(j['stage'], src), 'vs_pad': pad}
+diff --git a/dm/gfx/tools/dmsh_chain.py b/dm/gfx/tools/dmsh_chain.py
+index 14a8e6f..a621020 100644
+--- a/dm/gfx/tools/dmsh_chain.py
++++ b/dm/gfx/tools/dmsh_chain.py
+@@ -24,7 +24,7 @@ DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # 工
+ HERE = os.path.dirname(os.path.abspath(__file__)); GFX = os.path.dirname(HERE); HOME = os.path.expanduser('~')
+ sys.path.insert(0, os.path.join(GFX, '../games')); import game as _game   # 游戏档案 | game profiles
+ GAME = _game.load()
+-FILES = ['tools/dmsh_chain.py', 'tools/dmsh_build.py', 'tools/dmsh_fetch.py', 'tools/dmsh_facts.py', 'tools/dmsh_xlate/Program.cs', 'tools/dmsh_xlate/dmsh_xlate.csproj', '../ios/tools/ios_metal.py', 'tools/dmsh_chain.lock']
++FILES = ['tools/dmsh_chain.py', 'tools/dmsh_build.py', 'tools/dmsh_fetch.py', 'tools/dmsh_facts.py', 'tools/shader_driver.py', 'tools/dmsh_xlate/Program.cs', 'tools/dmsh_xlate/dmsh_xlate.csproj', '../ios/tools/ios_metal.py', 'tools/dmsh_chain.lock']
+ TABLES = ['shader_facts.tsv', 'shader_map.tsv', 'shader_map.tsv.conflicts.tsv', 'shader_pairs.tsv']   # 游戏档案目录里的 | in the game profile folder
+ LOCK = os.path.join(HERE, 'dmsh_chain.lock'); HEADER = str(GAME.table('dmsh_chain.h'))
+ # 翻译器缺省用仓内与锁文件一致的那份（重编出的 dll 指纹不同） | the translator defaults to the in-repo build that matches the lock file (a rebuilt dll has different fingerprints)
 diff --git a/dm/gfx/tools/shader_split.py b/dm/gfx/tools/shader_split.py
 index bea0206..48ba7bd 100644
 --- a/dm/gfx/tools/shader_split.py
@@ -205,6 +320,47 @@ index bea0206..48ba7bd 100644
      keys = {}
      # 第一遍：全部文件；Unity 资源包带类型树，顺手收下 Shader 的树。第二遍：没带类型树的 Unity 序列化文件借这些树再扫
      # First pass: every file; Unity bundles carry type trees, and the Shader trees are collected on the way. Second pass: Unity serialized files without type trees are scanned again with the borrowed trees
+diff --git a/dm/host/hle_fs.c b/dm/host/hle_fs.c
+index d90aef6..4e24919 100644
+--- a/dm/host/hle_fs.c
++++ b/dm/host/hle_fs.c
+@@ -480,6 +480,11 @@ HLE_FORCE("_ZN2nn2fs13MountSaveDataEPKcRKNS_7account3UidE", "fsp-srv；存档 
+     { const char *e = getenv("DM_TOUCH_DEFAULTS"); if (d2r && g_dm_mount_seed_hook && (e ? strcmp(e, "0") != 0 : TARGET_OS_IPHONE)) g_dm_mount_seed_hook(dd); }
+     return mount_ex(name, dd, 0, 1);
+ }
++// 动森 main ff1d1c05670db6021c85b624a710b963 使用设备存档（全岛共享），没有用户 UID。
++// ACNH main ff1d1c05670db6021c85b624a710b963 uses device saves (one shared island), without a user UID.
++HLE_FORCE("_ZN2nn2fs19MountDeviceSaveDataEPKc", "fsp-srv；设备存档接同一事务目录，保留 Commit/回滚语义", Result, h_fs_MountDeviceSave, const char *name) {
++    return h_fs_MountSave(name, NULL);
++}
+ void (*g_dm_pre_commit_hook[4])(const char *workdir);   // 提交前调（工作目录）：宿主旁路文件按工作目录里的存档内容核对后再写（[0] 个人仓库多页 dm_pages.c、[2] 百宝囊 dm_pouch.c、[1] 编年史仓库 dm_vault.c、[3] 秘境进度 dm_rift.c） | called before commit (working directory): host side files are checked against the save contents in the working directory before being written ([0] personal stash pages dm_pages.c, [2] pouch dm_pouch.c, [1] chronicle vault dm_vault.c, [3] rift progress dm_rift.c)
+ void (*g_dm_save_commit_hook)(const char *commit_dir);   // 存档提交成功后调（已提交目录）；iOS 的 iCloud 同步设它，宿主为空 | called after a save commit succeeds (committed directory); the iOS iCloud sync sets it, NULL on the host
+ static _Atomic uint64_t g_save_commits;   // 成功提交过几次（前端进后台时等「游戏这次存盘已提交」用） | number of successful commits (used by the front end when going to background to wait for "the game's current save has been committed")
+diff --git a/dm/host/tests/t_fs.c b/dm/host/tests/t_fs.c
+index 57de93d..167dc03 100644
+--- a/dm/host/tests/t_fs.c
++++ b/dm/host/tests/t_fs.c
+@@ -183,6 +183,20 @@ int main(void) {
+     snprintf(p, sizeof p, "%s/a", save); CHECK(same(p, "ok3"), "已提交 a = ok3");
+ 
+ 
++    // 动森的设备存档也必须经过事务：未提交写不改已提交目录，失败提交后恢复旧版。
++    // ACNH device saves must remain transactional: uncommitted writes preserve the committed directory, and failed commits restore it.
++    g_nmnt = 0;
++    CHECK(h_fs_MountDeviceSave("island") == RES_OK, "设备存档挂载成功");
++    CHECK(write_save("island:/a", "island1") == RES_OK, "设备存档写工作目录");
++    snprintf(p, sizeof p, "%s/a", save); CHECK(same(p, "ok3"), "设备存档提交前仍是已提交的 ok3");
++    CHECK(h_fs_Commit("island") == RES_OK && same(p, "island1"), "设备存档 Commit 发布完整新版本");
++    g_mode = 1; g_calls = 0;
++    CHECK(write_save("island:/a", "broken") != RES_OK, "设备存档检测写失败");
++    g_mode = 0;
++    CHECK(h_fs_Commit("island") != RES_OK && same(p, "island1"), "设备存档失败提交保留旧版");
++    char island_got[64];
++    CHECK(read_fs("island:/a", island_got, sizeof island_got) && !strcmp(island_got, "island1"), "设备存档失败后工作目录恢复旧版");
++
+     // 语言开关改写设置文件（settings_lang_apply）：期望值按规则手算——只在「与开关不符」时把 Language / VoiceLanguage 改成 0（英文）或 8（简中），别的键和别的语言不动
+     // Language switch rewriting the settings file (settings_lang_apply): expected values computed by hand from the rule -- only when it "does not match the switch" are Language / VoiceLanguage changed to 0 (English) or 8 (Simplified Chinese); other keys and other languages are untouched
+     { extern int g_t_lang; char sd[1200], sf[1300], gotj[512]; snprintf(sd, sizeof sd, "%s/langt", root); mkdir(sd, 0755); snprintf(sf, sizeof sf, "%s/Settings", sd); mkdir(sf, 0755); snprintf(sf, sizeof sf, "%s/Settings/Settings.json", sd);
 diff --git a/dm/ios/project.yml b/dm/ios/project.yml
 index b22f471..234d1a1 100644
 --- a/dm/ios/project.yml
