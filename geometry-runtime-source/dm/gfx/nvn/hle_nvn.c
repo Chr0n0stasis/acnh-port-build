@@ -1549,10 +1549,10 @@ NVN(nvnCommandBufferReportValue, void, NVNcommandBuffer *c, uint32_t v, NVNbuffe
 // Clear a buffer to a 32-bit value: one OP_CLEAR_BUF record, filled in order within the submission at replay (fillBuffer when all bytes match, otherwise copied from a pattern buffer)
 NVN(nvnCommandBufferClearBuffer, void, NVNcommandBuffer *c, NVNbufferAddress a, size_t n, uint32_t v) { *REC(c, OP_CLEAR_BUF, p_clear_buf) = (p_clear_buf){a, n, v, 0}; }
 
-// 回放层还没有的状态：只记一次（条件渲染按「恒画」处理）
-// State the replay layer does not have yet: logged once (conditional rendering is treated as "always draw")
-NVN(nvnCommandBufferSetRenderEnable, void, NVNcommandBuffer *c, uint32_t en) { (void)c; if (!(en & 0xff)) ONCE_LOG("【红】SetRenderEnable(false)：宿主暂按恒画"); }
-NVN(nvnCommandBufferSetRenderEnableConditional, void, NVNcommandBuffer *c, NVNconditionalRenderMode m, NVNbufferAddress a) { (void)c; (void)m; (void)a; ONCE_LOG("【红】SetRenderEnableConditional：宿主暂按恒画"); }
+// 条件状态必须随命令回放；记录时读条件会早于之前的 GPU 写入。
+// Predicate state must be replayed with commands; reading it while recording precedes earlier GPU writes.
+NVN(nvnCommandBufferSetRenderEnable, void, NVNcommandBuffer *c, uint32_t en) { *REC(c, OP_RENDER_ENABLE, p_render_enable) = (p_render_enable){.enabled = !!B(en)}; }
+NVN(nvnCommandBufferSetRenderEnableConditional, void, NVNcommandBuffer *c, NVNconditionalRenderMode m, NVNbufferAddress a) { *REC(c, OP_RENDER_CONDITIONAL, p_render_enable) = (p_render_enable){.addr = a, .mode = m}; }
 NVN(nvnCommandBufferSetDepthClamp, void, NVNcommandBuffer *c, uint32_t en) { (void)c; if (en & 0xff) ONCE_LOG("SetDepthClamp 开：宿主暂忽略"); }
 NVN(nvnCommandBufferSetLineWidth, void, NVNcommandBuffer *c, float w) { (void)c; if (w != 1.0f) ONCE_LOG("SetLineWidth %.2f：Metal 只有 1 像素线", w); }
 NVN(nvnCommandBufferSetPointSize, void, NVNcommandBuffer *c, float s) { (void)c; (void)s; ONCE_LOG("SetPointSize：点大小由着色器给"); }

@@ -5527,6 +5527,7 @@ static int frz_op(unsigned op, const void *a) {   // 返回 1 = 这条操作不�
 }
 
 void mtl_exec(const uint8_t *p) {
+    static int render_enabled = 1;
     static int inited; if (!inited) { inited = 1; state_reset(); }
     static int dump_all = -1; if (dump_all < 0) dump_all = getenv("DM_NVN_PASSDUMP_ALL") != NULL;
     int trace = dump_all && passdump();   // 普通模式不逐操作查帧范围，完整命令位置仅用于指定诊断帧 | Normal mode does not check the frame range per operation; the full command position is only used for the designated diagnostic frames
@@ -5544,7 +5545,39 @@ void mtl_exec(const uint8_t *p) {
         if (g_allocprof) { static uint64_t last; static int prev = -1; uint64_t now = g_dev.currentAllocatedSize; if (prev >= 0 && prev < 64 && now > last) g_ap_bytes[prev] += now - last; last = now; prev = h.op; }
         if (g_hoist_n && hoist_take(p)) { if (g_fz.active && p == g_fz.rt2_op) { g_fz.phase = 2; g_rt_merged = 0; PD("F %llu 合并通道进入后一个通道的绘制", g_stat_pass); } p += h.size; continue; }   // 已提前执行的纯清除通道 / 已并入的后一个通道开头   // 进入后一个通道：前一个通道的同目标续用到此为止，后一个通道读前一个通道附件由 fz_p2_draw 证本像素，不再按续用规则切开 | A pure-clear render pass already executed early / the start of a later pass already merged in   // Entering the later pass: the same-target continuation of the earlier pass ends here; the later pass reading the earlier pass's attachment is proven to be same-pixel by fz_p2_draw, and is no longer split by the continuation rule
         const void *a = p + 8;
+        // NVN 的条件渲染也控制附件清除，不能让禁用区间的清除覆盖已经绘制的场景。
+        // NVN predicates also gate attachment clears; disabled clears must not erase the rendered scene.
+        if (!render_enabled && (h.op == OP_DRAW || h.op == OP_DRAW_IDX || h.op == OP_CLEAR_COLOR || h.op == OP_CLEAR_DS)) {
+            PD("E skip cmd=%p op=%u", p, h.op); p += h.size; continue;
+        }
         switch (h.op) {
+            case OP_RENDER_ENABLE: {
+                rp_flush();
+                render_enabled = ((const p_render_enable *)a)->enabled != 0;
+                PD("E enable=%d cmd=%p", render_enabled, p);
+                break;
+            }
+            case OP_RENDER_CONDITIONAL: {
+                p_render_enable predicate = *(const p_render_enable *)a;
+                const p_render_enable *c = &predicate;
+                if (c->mode > NVN_CONDITIONAL_RENDER_MODE_RENDER_IF_NOT_EQUAL) MDIE("Unknown conditional render mode %u", c->mode);
+                // 先完成前面的命令及查询写回，再读两个相隔 16 字节的 32 位比较值。
+                // Complete prior commands and query writebacks before reading two 32-bit values 16 bytes apart.
+                // CPU 同步是 bring-up 实现；后续可以换 GPU 间接绘制来避免这次等待。
+                // This bring-up implementation synchronizes on the CPU; GPU indirect draws can remove the wait later.
+                uint64_t fence = mtl_sub_commit();
+                mtl_wait(fence, UINT64_MAX);
+                mtl_sub_begin(); args_dirty_all();
+                void *buffer; uint64_t off;
+                if (!mtl_addr(c->addr, 20, &buffer, &off)) MDIE("Conditional render address is outside memory pools: %#llx", c->addr);
+                const uint8_t *mem = (const uint8_t *)((__bridge id<MTLBuffer>)buffer).contents + off;
+                uint32_t lhs, rhs; memcpy(&lhs, mem, 4); memcpy(&rhs, mem + 16, 4);
+                render_enabled = c->mode == NVN_CONDITIONAL_RENDER_MODE_RENDER_IF_EQUAL ? lhs == rhs : lhs != rhs;
+                static int logged;
+                if (logged++ < 8) MLOG("Conditional render: mode=%u addr=%#llx values=%u,%u enabled=%d", c->mode, c->addr, lhs, rhs, render_enabled);
+                PD("E conditional cmd=%p mode=%u addr=%#llx lhs=%u rhs=%u enable=%d", p, c->mode, c->addr, lhs, rhs, render_enabled);
+                break;
+            }
             case OP_END: g_exec_cur = NULL;
                 if (g_hoist_n && !g_ret_n && !g_nrest) {
                     if (g_fz.active) fz_unskip();

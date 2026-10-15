@@ -61,6 +61,12 @@ int main(void) {
     const int16_t expected[8] = {32767, 200, -32768, -200, 100, 32767, -100, -32768};
     CHECK(!memcmp(out, expected, sizeof expected));
     CHECK(!g_capture.active && !g_capture.commands && old_lookups == 0);
+    memcpy(samples, (int32_t[]){40000, -40000, 100, -100, 200, -200, 32767, -32768}, sizeof samples);
+    g_frame_n = 0;
+    // 实际虚表尾调进入 SystemExec，必须同样持锁并捕获本轮 PCM。
+    // The real vtable tail call enters SystemExec and must hold the lock and capture this frame's PCM too.
+    CHECK(h_ar_SystemExec(NULL) == 0 && g_frame_n == 4 && executions == 2);
+    CHECK(!memcmp(g_frame, expected, sizeof expected));
     h_ar_ProcessorSetup(NULL, commands, sizeof commands);
     CHECK(!g_capture.commands);
     CHECK(h_ars_Update(NULL, NULL, 0, NULL, 0, NULL, 0) == 0 && updates == 1);

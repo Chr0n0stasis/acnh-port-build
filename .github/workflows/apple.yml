@@ -72,9 +72,9 @@ jobs:
             work/toolbin
             output/msl-mac
             output/msl-ios
-          key: acnh-apple-${{ runner.os }}-${{ runner.arch }}-${{ inputs.geometry_runtime && format('geometry-{0}-', hashFiles('geometry-runtime-source/**')) || '' }}migration
+          key: acnh-apple-${{ runner.os }}-${{ runner.arch }}-${{ inputs.geometry_runtime && format('geometry-{0}-', '271b0a486c35d453753c1423c6ac9121a9980492e3ecd967b1ad8df706a9d6a4') || '' }}migration
           restore-keys: |
-            acnh-apple-${{ runner.os }}-${{ runner.arch }}-${{ inputs.geometry_runtime && format('geometry-{0}-', hashFiles('geometry-runtime-source/**')) || '' }}
+            acnh-apple-${{ runner.os }}-${{ runner.arch }}-${{ inputs.geometry_runtime && format('geometry-{0}-', '271b0a486c35d453753c1423c6ac9121a9980492e3ecd967b1ad8df706a9d6a4') || '' }}
       - name: Prepare Apple translation chain
         id: prepare
         run: bash ci/build.sh prepare
@@ -100,9 +100,9 @@ jobs:
             work/toolbin
             output/msl-mac
             output/msl-ios
-          key: acnh-apple-${{ runner.os }}-${{ runner.arch }}-${{ inputs.geometry_runtime && format('geometry-{0}-', hashFiles('geometry-runtime-source/**')) || '' }}incremental
+          key: acnh-apple-${{ runner.os }}-${{ runner.arch }}-${{ inputs.geometry_runtime && format('geometry-{0}-', '271b0a486c35d453753c1423c6ac9121a9980492e3ecd967b1ad8df706a9d6a4') || '' }}incremental
           restore-keys: |
-            acnh-apple-${{ runner.os }}-${{ runner.arch }}-${{ inputs.geometry_runtime && format('geometry-{0}-', hashFiles('geometry-runtime-source/**')) || '' }}
+            acnh-apple-${{ runner.os }}-${{ runner.arch }}-${{ inputs.geometry_runtime && format('geometry-{0}-', '271b0a486c35d453753c1423c6ac9121a9980492e3ecd967b1ad8df706a9d6a4') || '' }}
       - name: Verify ARM64 rewrite structure
         if: ${{ inputs.verify_rewrite }}
         run: bash ci/build.sh verify
