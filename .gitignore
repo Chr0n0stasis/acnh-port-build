@@ -1,0 +1,9 @@
+source/
+work/
+output/
+*.zip
+*.keys
+*.nsp
+*.nca
+*.bin
+__pycache__/

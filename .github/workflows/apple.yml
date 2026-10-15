@@ -1,0 +1,50 @@
+name: ACNH Apple build
+on:
+  workflow_dispatch:
+    inputs:
+      input_tag:
+        description: Private release containing build-inputs.zip
+        type: string
+        required: true
+        default: inputs-v2228224
+permissions:
+  contents: read
+concurrency:
+  group: acnh-apple
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
+      DM_GAME: acnh
+      GAME: acnh
+      PYTHONUNBUFFERED: '1'
+      J: '3'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.402'
+      - name: Fetch private build inputs
+        env:
+          INPUT_TAG: ${{ inputs.input_tag }}
+        run: |
+          test "$(gh repo view "$GITHUB_REPOSITORY" --json visibility --jq .visibility)" = PRIVATE
+          gh release download "$INPUT_TAG" --repo "$GITHUB_REPOSITORY" --pattern build-inputs.zip
+          shasum -a 256 -c input-sha256.txt
+          unzip -q build-inputs.zip -d work
+      - name: Build Apple targets
+        run: bash ci/build.sh
+      - name: Upload private diagnostics and outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: acnh-apple-${{ github.run_number }}
+          retention-days: 7
+          path: |
+            output/
+            source/dm/games/acnh/
+            source/dm/gfx/tools/dmsh_chain.lock
+          if-no-files-found: warn

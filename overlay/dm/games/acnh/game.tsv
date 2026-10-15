@@ -1,0 +1,34 @@
+# 动森 3.0.3：身份/模块取自本地解包；内存和 NVN 参数尚待起机/着色器统计验证。
+# ACNH 3.0.3: identity/modules measured locally; memory/NVN values await bring-up and shader census.
+title_id	01006F8002326000
+program_id	01006F8002326000
+app_name	Animal Crossing
+bundle_id	org.acnhmobile.app
+ipa	ACNHMobile.ipa
+app_category	public.app-category.games
+build	v2228224	3.0.3	main=ff1d1c05670db6021c85b624a710b963	subsdk0=6c6ceace7be94107a8bd440bc2d60704	sdk=a226048605d3597f90cb1067d141cd36
+package	v2228224
+shader_versions	v2228224
+modules	main subsdk0 sdk
+romfs_marker	Shader/Park_UBER_All.Nin_NX_NVN.szs
+zip_store	.zs:.szs:.bwav:.metallib
+present_interval	game
+# 通用宿主起机初值；不是 iPhone 13 实测内存预算或成功运行的声明。
+# Initial generic-host values, not a measured iPhone 13 memory budget or a runtime-support claim.
+mem_reserve	0x140000000
+mem_alias	0xB8000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# 待全库着色器统计：先用较新 NVN 布局，不复用暗黑反射表。
+# Await shader census: start with the newer NVN layout, without reusing D2R reflection tables.
+nvn_tex_base	0x20
+# 动森自带键盘资源的控制段只有 0x850 字节；统一键前缀，扫描器拒绝同键异控制段。
+# Bundled ACNH keyboard controls are only 0x850 bytes; use one key prefix, rejecting differing controls with the same key.
+nvn_ctl_hash_bytes	0x850
+nvn_tex_slots	32
+nvn_samp_base	0x568
+nvn_img_base	0x120
+nvn_img_slots	8
+nvn_ssbo_bases	vs=0x110 ps=0x510 cs=0x310
+shader_groups	/Shader/Park_UBER=park /Shader/=engine /Effect/=effect /Layout/=layout /Model/=model
+shader_note	动森 3.0.3 着色器
