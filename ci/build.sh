@@ -68,6 +68,9 @@ phase_verify() {
 }
 
 phase_host() {
+  clang -O1 -Wno-unused-function -Isource/dm/host/gen/acnh -Isource/dm/games/acnh source/dm/host/tests/t_time_boot.c -framework CoreFoundation -o work/t_time_boot > output/time-boot-build.log 2>&1
+  work/t_time_boot > output/time-boot-test.log 2>&1
+  work/t_time_boot --fixed >> output/time-boot-test.log 2>&1
   clang -O1 -Wno-unused-function -Isource/dm/host/gen/acnh -Isource/dm/games/acnh source/dm/host/tests/t_bcat.c -o work/t_bcat > output/bcat-build.log 2>&1
   work/t_bcat > output/bcat-test.log 2>&1
   python3 source/dm/tools/make_ext_font.py work/nintendo_ext.ttf

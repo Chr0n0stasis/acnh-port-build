@@ -468,7 +468,7 @@ index bea0206..48ba7bd 100644
      # 第一遍：全部文件；Unity 资源包带类型树，顺手收下 Shader 的树。第二遍：没带类型树的 Unity 序列化文件借这些树再扫
      # First pass: every file; Unity bundles carry type trees, and the Shader trees are collected on the way. Second pass: Unity serialized files without type trees are scanned again with the borrowed trees
 diff --git a/dm/host/Makefile b/dm/host/Makefile
-index d689496..692ee0a 100644
+index d689496..152d11c 100644
 --- a/dm/host/Makefile
 +++ b/dm/host/Makefile
 @@ -54,5 +54,5 @@ $(GAME_STAMP): FORCE
@@ -476,8 +476,9 @@ index d689496..692ee0a 100644
  .PHONY: FORCE
  FORCE:
 -dmhost: $(SRC) $(GFX) dm.h hle.h dm_input.h front.h touch_mac.h ../ios/Sources/dm_touch_controls.[ch] $(GFX_H) $(GAME_H) $(GAME_DIR)/dmsh_chain.h $(GAME_STAMP) $(VPX_LIB)
+-	clang $(CFLAGS) -I../gfx/nvn/include -I$(dir $(GAME_H)) -I$(GAME_DIR) -I$(VPX) -fobjc-arc -o $@ $(SRC) $(GFX) $(VPX_LIB) -framework Cocoa -framework QuartzCore -framework Metal -framework AudioToolbox -framework ImageIO -framework UniformTypeIdentifiers
 +dmhost: $(SRC) $(GFX) dm.h dm_relr.h hle.h dm_input.h front.h touch_mac.h ../ios/Sources/dm_touch_controls.[ch] $(GFX_H) $(GAME_H) $(GAME_DIR)/dmsh_chain.h $(GAME_STAMP) $(VPX_LIB)
- 	clang $(CFLAGS) -I../gfx/nvn/include -I$(dir $(GAME_H)) -I$(GAME_DIR) -I$(VPX) -fobjc-arc -o $@ $(SRC) $(GFX) $(VPX_LIB) -framework Cocoa -framework QuartzCore -framework Metal -framework AudioToolbox -framework ImageIO -framework UniformTypeIdentifiers
++	clang $(CFLAGS) -I../gfx/nvn/include -I$(dir $(GAME_H)) -I$(GAME_DIR) -I$(VPX) -fobjc-arc -o $@ $(SRC) $(GFX) $(VPX_LIB) -framework Cocoa -framework CoreFoundation -framework QuartzCore -framework Metal -framework AudioToolbox -framework ImageIO -framework UniformTypeIdentifiers
 diff --git a/dm/host/dm.h b/dm/host/dm.h
 index 615d884..9c8d182 100644
 --- a/dm/host/dm.h
@@ -838,6 +839,39 @@ index 7547755..bcf059a 100644
          case I_SysResTotal: v = 0x2000000; break; case I_SysResUsed: v = 0x400000; break;
          case I_DebuggerAttached: v = 0; break;
          case I_RandomEntropy: { uint64_t dm_entropy64(void); v = dm_entropy64(); break; }   // DM_DETCLOCK 开时为确定流（hle_os.c） | a deterministic stream when DM_DETCLOCK is on (hle_os.c)
+diff --git a/dm/host/hle_time.c b/dm/host/hle_time.c
+index 60160cc..b5883d8 100644
+--- a/dm/host/hle_time.c
++++ b/dm/host/hle_time.c
+@@ -7,9 +7,7 @@
+ #include "hle.h"
+ #include <stdatomic.h>
+ #include <time.h>
+-
+-typedef struct { int16_t year; int8_t month, day, hour, minute, second; int8_t pad; } CalendarTime;
+-typedef struct { uint32_t wday, yday; char tzname[8]; uint32_t dst; int32_t offset; } CalendarAdditionalInfo;
++#include "dm_time_types.h"
+ 
+ // DM_FIXED_TIME=秒（确定性对拍用；真值侧对应 dm/verify/ryu/drive.py --fix-time）：
+ // ① 用户时钟（存档 d2s +0x20 最后游玩时间、.meta last_modified_time 的来源）恒返回该值；
+@@ -52,6 +50,17 @@ HLE_FORCE("_ZN2nn4time13IsInitializedEv", "time 服务已被接管，恒为已
+ HLE_FORCE("_ZN2nn4time23StandardUserSystemClock14GetCurrentTimeEPNS0_9PosixTimeE", "用户时钟 → 宿主 time()", Result, h_time_GetCurrentTime, int64_t *out) {
+     int64_t ft = fixed_time(); *out = ft >= 0 ? ft : time(NULL); return RES_OK;
+ }
++// 宿主墙钟已经由操作系统校准；不建立 SDK 的共享内存时钟副本。
++// The host OS owns wall-clock adjustment; do not construct a separate SDK shared-memory clock.
++HLE_FORCE("_ZN2nn4time25AdjustableUserSystemClock6AdjustEv", "可调用户时钟：由宿主系统维护，不读取 Switch 时间共享内存", void, h_time_Adjust, void) {
++    static _Atomic int once; if (!atomic_exchange(&once, 1)) LOG("time：可调用户时钟由宿主墙钟维护");
++}
++HLE_FORCE("_ZN2nn4time25AdjustableUserSystemClock14GetCurrentTimeEPNS0_9PosixTimeE", "可调用户时钟与标准用户时钟共用宿主墙钟及 DM_FIXED_TIME", Result, h_time_AdjustableCurrent, int64_t *out) {
++    return h_time_GetCurrentTime(out);
++}
++HLE_FORCE("_ZN2nn4time25AdjustableUserSystemClock3nowEv", "可调用户时钟 now：与 GetCurrentTime 一致", int64_t, h_time_AdjustableNow, void) {
++    int64_t value; h_time_GetCurrentTime(&value); return value;
++}
+ // 首领连战第 6–10 关的强制恐怖地带（dm_bossrush.c 设）：g_dm_tz_time 非 0 且未过期时，只有「恐怖地带」那几处取时钟拿到它，存档时间等其余调用照旧。
+ // 哪几处：返回点落在地带函数 0x58f1e0 起的那一簇（0x58f1e0–0x591440），或返回后 8 条指令内调地带日程 0x58f310（服务端 0x636b38 套地带、0x694b48 等 9 处）。
+ // 过期：dm_bossrush 每拍续 1 秒，本局停拍（退出 / 崩溃）后不再生效，下一局建局时取到的是真实时钟。
 diff --git a/dm/host/loader.c b/dm/host/loader.c
 index bb94f7a..0950f47 100644
 --- a/dm/host/loader.c
