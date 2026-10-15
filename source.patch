@@ -674,6 +674,32 @@ index c85df0c..b58a33a 100644
      last_r = atomic_load(&g_renders);
      return res;
  }
+diff --git a/dm/host/hle_friends.c b/dm/host/hle_friends.c
+index 16c3016..2291791 100644
+--- a/dm/host/hle_friends.c
++++ b/dm/host/hle_friends.c
+@@ -60,3 +60,21 @@ HLE_FORCE("_ZN2nn7friends33ShowMethodsOfSendingFriendRequestERKNS_7account3UidE"
+ HLE_FORCE("_ZN2nn7friends12UserPresence10InitializeERKNS_7account3UidE", "在线状态不可用（剪）", Result, h_fr_UpInit, void *self, const void *uid) { (void)self; (void)uid; return RES_FAIL; }
+ HLE_FORCE("_ZN2nn7friends12UserPresence14SetDescriptionEPKc", "在线状态不可用（剪）", Result, h_fr_UpDesc, void *self, const char *s) { (void)self; (void)s; return RES_FAIL; }
+ HLE_FORCE("_ZN2nn7friends12UserPresence6CommitEv", "在线状态不可用（剪）", Result, h_fr_UpCommit, void *self) { (void)self; return RES_FAIL; }
++
++HLE_FORCE("_ZN2nn7friends28DeclareOpenOnlinePlaySessionERKNS_7account3UidE", "声明开启在线会话（离线报成功）", Result, h_fr_OpenSession, const void *uid) {
++    (void)uid;
++    return RES_OK;
++}
++HLE_FORCE("_ZN2nn7friends29DeclareCloseOnlinePlaySessionERKNS_7account3UidE", "声明关闭在线会话（离线报成功）", Result, h_fr_CloseSession, const void *uid) {
++    (void)uid;
++    return RES_OK;
++}
++HLE_FORCE("_ZN2nn7friends18GetBlockedUserListEPiPNS_7account23NetworkServiceAccountIdERKNS2_3UidEii", "黑名单列表（离线为空）", Result, h_fr_GetBlocked, int *count, void *out, const void *uid, int off, int n) {
++    (void)out; (void)uid; (void)off; (void)n;
++    if (count) *count = 0;
++    return RES_OK;
++}
++HLE_FORCE("_ZN2nn7friends25StartSendingFriendRequestERKNS_7account3UidERKNS1_23NetworkServiceAccountIdERKNS0_15InAppScreenNameESA_", "发送好友申请（离线不可用）", Result, h_fr_SendRequest, const void *uid, const void *id, const void *a, const void *b) {
++    (void)uid; (void)id; (void)a; (void)b;
++    return RES_FAIL;
++}
 diff --git a/dm/host/hle_fs.c b/dm/host/hle_fs.c
 index d90aef6..4590b9b 100644
 --- a/dm/host/hle_fs.c
@@ -950,7 +976,7 @@ index 3917a91..be3afde 100644
  // 商店属排除范围：空操作。游戏不看返回值（两个重载都按无返回值处理）
  // ---------- ec: shop applet (the upgrade-to-Switch-2-Edition page) ----------
 diff --git a/dm/host/hle_sdkinit.c b/dm/host/hle_sdkinit.c
-index 26afed1..6013d68 100644
+index 26afed1..b7cedd9 100644
 --- a/dm/host/hle_sdkinit.c
 +++ b/dm/host/hle_sdkinit.c
 @@ -10,6 +10,14 @@
@@ -968,7 +994,7 @@ index 26afed1..6013d68 100644
  HLE_FORCE("nndiagStartup", "连 lm 日志服务；诊断日志改由宿主直接输出", void, h_nndiagStartup, void) { once("nndiagStartup"); }
  HLE_FORCE("_ZN2nn2oe10InitializeEv", "连 am/oe 运行环境服务；运行环境查询逐个接成宿主默认值", void, h_oe_Initialize, void) { once("oe::Initialize"); }
  HLE_FORCE("_ZN2nn3aoc10InitializeEv", "追加内容(DLC)服务：不建会话（无服务进程）；已拥有清单由 hle_misc.c 的 aoc 接口给出（术士君临，非空）", void, h_aoc_Initialize, void) { once("aoc::Initialize"); }
-@@ -17,3 +25,18 @@ HLE_FORCE("_ZN2nn3err26InitializeContextWriterApiEv", "连 err 错误上下文
+@@ -17,3 +25,27 @@ HLE_FORCE("_ZN2nn3err26InitializeContextWriterApiEv", "连 err 错误上下文
  HLE_FORCE("_ZN2nn2fs24InitializeForApplicationEv", "连 fsp-srv 文件服务；文件接口接宿主文件系统 + RomFS", void, h_fs_InitApp, void) { once("fs::InitializeForApplication"); }
  HLE_FORCE("_ZN2nn4pctl10InitializeEv", "连 pctl 家长控制服务；单机无家长控制", void, h_pctl_Initialize, void) { once("pctl::Initialize"); }
  HLE_FORCE("_ZN2nn4diag34InitializeApplicationAbortObserverEv", "注册到系统的中止观察；宿主崩溃由信号处理打印", void, h_diag_AbortObs, void) { once("diag::InitializeApplicationAbortObserver"); }
@@ -987,8 +1013,17 @@ index 26afed1..6013d68 100644
 +HLE_FORCE("_ZN2nn2sf4hipc29FinalizeHipcServiceResolutionEv", "HIPC 服务会话解析收尾", void, h_hipc_Final, void) {
 +    once("hipc::FinalizeHipcServiceResolution");
 +}
++
++HLE_FORCE("_ZN2nn2sf4hipc20ConnectToHipcServiceEPNS_3svc6HandleEPKc", "连接 HIPC 服务；单机无服务守护进程", Result, h_hipc_Connect, void *handle, const char *name) {
++    LOG("hipc::ConnectToHipcService: 尝试连接未运行服务 '%s' (安全拒绝)", name ? name : "");
++    if (handle) *(uint32_t *)handle = 0;
++    return 0xee01;
++}
++HLE_FORCE("_ZN2nn2ec30ShowShopApplicationInformationEv", "商店信息小程序；宿主无此服务", Result, h_ec_ShowShop, void) {
++    return RES_FAIL;
++}
 diff --git a/dm/host/hle_svc.c b/dm/host/hle_svc.c
-index 7547755..bcf059a 100644
+index 7547755..e95f7c5 100644
 --- a/dm/host/hle_svc.c
 +++ b/dm/host/hle_svc.c
 @@ -252,7 +252,9 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
@@ -1002,6 +1037,17 @@ index 7547755..bcf059a 100644
          case I_SysResTotal: v = 0x2000000; break; case I_SysResUsed: v = 0x400000; break;
          case I_DebuggerAttached: v = 0; break;
          case I_RandomEntropy: { uint64_t dm_entropy64(void); v = dm_entropy64(); break; }   // DM_DETCLOCK 开时为确定流（hle_os.c） | a deterministic stream when DM_DETCLOCK is on (hle_os.c)
+@@ -263,6 +265,10 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
+         }
+         regs[0] = 0; regs[1] = v; return 0;
+     }
++    case 0x21: {  // ConnectToNamedPort(Handle* out, const char* name)
++        if (!g_seen[0x21]) { g_seen[0x21] = 1; LOG("SVC 0x21 ConnectToNamedPort: 单机无系统服务，返回 PortNotFound (0xee01)"); }
++        regs[0] = 0xee01; return 0;
++    }
+     default:
+         if (!g_seen[num & 0xff]) { g_seen[num & 0xff] = 1; LOG("SVC %#x x0=%#llx x1=%#llx x2=%#llx (占位返回成功)", num, regs[0], regs[1], regs[2]); }
+         regs[0] = 0; return 0;
 diff --git a/dm/host/hle_time.c b/dm/host/hle_time.c
 index 60160cc..b990ca7 100644
 --- a/dm/host/hle_time.c
