@@ -24,3 +24,9 @@ a separate versioned cache. The IPA uploads before the shader cache is saved.
 On the first use of the new cache, matching legacy output is restored and checked
 against a successful same-input, same-chain build before reuse. Cold compilation
 prints progress every 30 seconds, including translated shaders and built libraries.
+
+Device captures in the separate `captured-shaders-20261016.zip` input asset add
+48 byte-identified shaders before the chain is computed. No captured shader bytes
+are committed. A changed chain restores the old content-addressed compiler cache
+so unchanged shaders can be reused individually. Captured VS/PS interface padding
+uses conservative relationships; actual pairings and rendering need device testing.

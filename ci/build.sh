@@ -27,6 +27,7 @@ phase_prepare() {
   if [[ "${DM_GEOMETRY_RUNTIME:-0}" = 1 ]]; then
     cp -R geometry-runtime-source/. source/
   fi
+  python3 ci/import_captured_shaders.py
 
   xcodebuild -version
   uname -m
@@ -112,8 +113,8 @@ phase_host() {
 
 phase_shaders() {
   local use_cache=1
-  if [[ "${DM_LEGACY_CACHE:-0}" = 1 ]]; then
-    python3 source/dm/gfx/tools/dmsh_chain.py --check-tools
+  python3 source/dm/gfx/tools/dmsh_chain.py --check-tools
+  if [[ "${DM_LEGACY_CACHE:-0}" = 1 && -f "output/msl-mac/b-$CHAIN/_b_build.json" ]]; then
     python3 ci/reuse_shaders.py "$DM_LEGACY_SHADER_RUN" "$CHAIN"
   fi
   if [[ "$use_cache" = 1 && -f "output/msl-mac/b-$CHAIN/_b_build.json" ]] &&

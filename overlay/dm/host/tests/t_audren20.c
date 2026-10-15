@@ -9,11 +9,16 @@ static uint8_t commands[0x200];
 static int32_t samples[8] = {40000, -40000, 100, -100, 200, -200, 32767, -32768};
 static int setups, executions, updates, old_lookups, fail_render;
 static void mock_setup(void *proc, const void *cl, size_t size) { (void)proc; if (cl != commands || size != sizeof commands) abort(); setups++; }
+static void mock_dispatch(void *proc, const uint8_t *command) { (void)proc; (void)command; }
 static Result mock_exec(void *sys) {
     (void)sys; executions++;
     if (pthread_mutex_trylock(&g_render_mu) != EBUSY) abort();
     if (fail_render) return 0x40299;
     h_ar_ProcessorSetup(NULL, commands, sizeof commands);
+    h_ar_Dispatch(NULL, commands + 0x20);
+    // 后续命令复用输入缓冲，已经取出的声音必须保持原值。
+    // Later commands reuse the input buffers; the captured audio must retain the original values.
+    memset(samples, 0, sizeof samples);
     return 0;
 }
 static Result mock_update(void *sys, void *o, size_t on, void *p, size_t pn, const void *in, size_t inn) {
@@ -25,6 +30,7 @@ void *guest_sym(const char *name) {
     if (strstr(name, "GenerateCommandImpl")) return &sdk_module;
     if (!strcmp(name, "_ZN2nn5audio6server17AudioRenderSystem29ExecuteAudioRendererRenderingEv")) return (void *)mock_exec;
     if (strstr(name, "CommandListProcessor5Setup")) return (void *)mock_setup;
+    if (strstr(name, "CommandListProcessor15DispatchCommand")) return (void *)mock_dispatch;
     if (strstr(name, "AudioRenderSystem6Update")) return (void *)mock_update;
     old_lookups++; abort();
 }
