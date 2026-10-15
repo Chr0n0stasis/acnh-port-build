@@ -1,5 +1,5 @@
 diff --git a/dm/games/game.py b/dm/games/game.py
-index 27d6045..7961a9a 100644
+index 27d6045..bbafaf7 100644
 --- a/dm/games/game.py
 +++ b/dm/games/game.py
 @@ -68,6 +68,12 @@ def header(g):
@@ -15,7 +15,7 @@ index 27d6045..7961a9a 100644
      vers = ', '.join('{' + q(b['main']) + ', ' + q(b['display']) + '}' for b in g.builds().values() if 'main' in b)
      pi = g.get('present_interval', 'game')   # 出图间隔：game = 按游戏设的（同 Switch），display = 每个显示节拍一帧 | present interval: game = as the game sets it (as on the Switch), display = one frame per display tick
      if pi not in ('game', 'display'): sys.exit(f'{g.id}: present_interval 只能是 game / display | present_interval must be game or display: {pi}')
-@@ -78,12 +84,19 @@ def header(g):
+@@ -78,12 +84,21 @@ def header(g):
           f'#define DM_GAME_PROGRAM_ID 0x{int(g.get("program_id"), 16):016X}ull',
           f'#define DM_GAME_MODULES {{{", ".join(map(q, mods))}}}',
           f'#define DM_GAME_NMOD {len(mods)}',
@@ -24,6 +24,8 @@ index 27d6045..7961a9a 100644
 +         f'#define DM_GAME_DEVICE_SAVE_MAX {int(g.get("device_save_max", "0"), 0):#x}ll',
 +         f'#define DM_GAME_DEVICE_SAVE_JOURNAL_MAX {int(g.get("device_save_journal_max", "0"), 0):#x}ll',
           f'#define DM_GAME_ROMFS_MARKER {q(g.get("romfs_marker"))}',
++         f'#define DM_GAME_RESOURCE_TITLE {q(g.get("title_id"))}',
++         f'#define DM_GAME_RESOURCE_BUILD {q(g.get("resource_pack_build", ""))}',
           f'#define DM_GAME_MEM_RESERVE {g.int("mem_reserve"):#x}ull',
           f'#define DM_GAME_MEM_ALIAS {g.int("mem_alias"):#x}ull',
           f'#define DM_GAME_MEM_STACK {g.int("mem_stack"):#x}ull',
@@ -530,11 +532,65 @@ index 57de93d..393b68e 100644
      // 语言开关改写设置文件（settings_lang_apply）：期望值按规则手算——只在「与开关不符」时把 Language / VoiceLanguage 改成 0（英文）或 8（简中），别的键和别的语言不动
      // Language switch rewriting the settings file (settings_lang_apply): expected values computed by hand from the rule -- only when it "does not match the switch" are Language / VoiceLanguage changed to 0 (English) or 8 (Simplified Chinese); other keys and other languages are untouched
      { extern int g_t_lang; char sd[1200], sf[1300], gotj[512]; snprintf(sd, sizeof sd, "%s/langt", root); mkdir(sd, 0755); snprintf(sf, sizeof sf, "%s/Settings", sd); mkdir(sf, 0755); snprintf(sf, sizeof sf, "%s/Settings/Settings.json", sd);
+diff --git a/dm/ios/Sources/front_ios.m b/dm/ios/Sources/front_ios.m
+index 9555b92..f7a6dc8 100644
+--- a/dm/ios/Sources/front_ios.m
++++ b/dm/ios/Sources/front_ios.m
+@@ -15,6 +15,7 @@ UIView *dm_gamepad_view(CGRect frame);
+ void dm_gamepad_reset(void);
+ void front_ios_boot(void);
+ int front_ios_boot_ok(void);
++UIViewController *dm_resources_controller(void);
+ 
+ static CAMetalLayer *g_layer;
+ 
+@@ -73,7 +74,7 @@ static CAMetalLayer *g_layer;
+ - (BOOL)prefersStatusBarHidden { return YES; }
+ - (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskLandscape; }
+ @end
+-UIViewController *front_ios_root(void) { return [DmRootVC new]; }
++UIViewController *front_ios_root(void) { return front_ios_boot_ok() ? [DmRootVC new] : dm_resources_controller(); }
+ 
+ void *front_metal_layer(void) { return (__bridge void *)g_layer; }
+ uint64_t front_game_res(int docked) { return docked ? 900ull << 32 | 1600 : 720ull << 32 | 1280; }   // 同 Mac：原版 16:9 常数 | Same as Mac: the original 16:9 constants
+diff --git a/dm/ios/Sources/main.m b/dm/ios/Sources/main.m
+index deaf00d..98433c3 100644
+--- a/dm/ios/Sources/main.m
++++ b/dm/ios/Sources/main.m
+@@ -63,6 +63,9 @@ static int boot_env(void) {
+     return 1;
+ }
+ static int g_boot_ok;
++// 缺资源页面完成导入后才重试；首次失败尚未启动宿主线程。
++// Retry after importing resources; the initial missing-resource path has not started the host.
++int front_ios_retry_boot(void) { if (!g_boot_ok) g_boot_ok = boot_env(); return g_boot_ok; }
+ 
+ static void *boot_thread(void *p) {
+     (void)p;
+@@ -72,7 +75,7 @@ static void *boot_thread(void *p) {
+     return NULL;
+ }
+ void front_ios_boot(void) {   // 窗口与 Metal 视图建好后由 front_ios.m 调 | Called by front_ios.m once the window and Metal view exist
+-    static int once; if (once++ || !g_boot_ok) return;
++    static int once; if (!g_boot_ok || once) return; once = 1;
+     void front_ios_audio_session(void); front_ios_audio_session();   // 游戏开声卡之前把 I/O 缓冲设短（front_ios.m） | set a short I/O buffer before the game opens audio output (front_ios.m)
+     pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 64u << 20);   // Switch 主线程栈由 npdm 定，宿主给足 | the Switch main thread stack is set by npdm; the host gives plenty
+     pthread_t t; pthread_create(&t, &a, boot_thread, NULL); pthread_detach(t);
 diff --git a/dm/ios/project.yml b/dm/ios/project.yml
-index b22f471..234d1a1 100644
+index b22f471..a4dad72 100644
 --- a/dm/ios/project.yml
 +++ b/dm/ios/project.yml
-@@ -63,7 +63,9 @@ targets:
+@@ -34,6 +34,9 @@ targets:
+         UILaunchStoryboardName: ""
+         UIFileSharingEnabled: true          # 「文件」App 里能看到 Documents（log.txt、存档） | Documents (log.txt, saves) visible in the Files app
+         LSSupportsOpeningDocumentsInPlace: true
++        NSLocalNetworkUsageDescription: 从同一局域网的电脑下载游戏资源。
++        NSAppTransportSecurity:
++          NSAllowsArbitraryLoads: true
+         UISupportedInterfaceOrientations:
+           - UIInterfaceOrientationLandscapeRight
+           - UIInterfaceOrientationLandscapeLeft
+@@ -63,7 +66,9 @@ targets:
        TARGETED_DEVICE_FAMILY: "1,2"
        ENABLE_BITCODE: NO
        GCC_C_LANGUAGE_STANDARD: gnu11
