@@ -2498,7 +2498,8 @@ void mtl_prog_release(prog_t *p) { if (p->serial) serial_del(p->serial); }
 // 登记时快照整个贴图对象（NVN 语义：描述符已写进池）；view：该号对应的 MTLTexture（视图或基贴图，CFBridgingRetain 持有）及取得时的序号表 / 客体写代号
 // ---------- Descriptor pool: texture ID / sampler ID → object ----------
 // At registration the whole texture object is snapshotted (NVN semantics: the descriptor has been written into the pool); view: the MTLTexture for that ID (a view or the base texture, held via CFBridgingRetain) and the serial-table / guest-write generations at the time it was obtained
-typedef struct { tex_t t; int ok; view_t v; int has_v; void *view; uint64_t view_id, view_rid, view_ser, view_dirty; } treg_t;
+typedef struct { tex_t t; int ok; view_t v; int has_v; void *view; uint64_t view_id, view_rid, view_ser, view_dirty;
+    void *array_view; uint64_t array_source_rid, array_rid; } treg_t;
 static treg_t *g_treg; static int g_ntreg;
 // 贴图号 → 序号的无锁副本（回放热路径只要序号：写回前瞻索引、纯清除前提的绑定集合）：贴图号 20 位，固定 1M 项（BSS，只占碰过的页），
 // 登记时 release 写、读端 relaxed 原子读，不进 g_rmu（原 h_ser 每次查表加解锁，营地每帧数千次）
@@ -2506,6 +2507,12 @@ static treg_t *g_treg; static int g_ntreg;
 // release write at registration, relaxed atomic read on the reader side, without entering g_rmu (the former h_ser locked and unlocked on every lookup, thousands of times per frame in the camp)
 static _Atomic uint64_t g_tser[1 << 20];
 static samp_par *g_sreg; static uint8_t *g_sreg_ok; static void **g_sview; static uint64_t *g_srid; static int g_nsreg;   // g_sview：采样器号 → MTLSamplerState（持有） | g_sview: sampler ID → MTLSamplerState (retained)
+static void treg_drop_views(treg_t *r) {
+    if (r->array_view) { defer_obj_unref((__bridge id)r->array_view); CFRelease(r->array_view); r->array_view = NULL; }
+    r->array_source_rid = r->array_rid = 0;
+    if (r->view) { defer_obj_unref((__bridge id)r->view); CFRelease(r->view); r->view = NULL; }
+    r->view_id = r->view_rid = 0;
+}
 // 内存池 Finalize：贴图号登记表里贴图建在这个池上的号，丢掉缓存的 MTLTexture（视图或基贴图）。缓存原先要等这个号被重新登记才放，
 // 池上直建的线性贴图就一直拖着整块池缓冲（Engage 标题演示里常有 6–17 块 16 MB 的已释放池缓冲活着）。号若还在用，下次取用走慢路重建
 // Memory pool Finalize: for texture IDs whose registered texture lives on this pool, drop the cached MTLTexture (view or base texture). The cache used to be released only when the ID was registered again,
@@ -2513,8 +2520,7 @@ static samp_par *g_sreg; static uint8_t *g_sreg_ok; static void **g_sview; stati
 static void treg_drop_pool_views(const void *pool) {
     pthread_mutex_lock(&g_rmu);
     for (int i = 0; i < g_ntreg; i++)
-        if (g_treg[i].view && g_treg[i].ok && (const void *)g_treg[i].t.pool == pool) {
-            defer_obj_unref((__bridge id)g_treg[i].view); CFRelease(g_treg[i].view); g_treg[i].view = NULL; g_treg[i].view_id = g_treg[i].view_rid = 0; }
+        if (g_treg[i].ok && (const void *)g_treg[i].t.pool == pool) treg_drop_views(&g_treg[i]);
     pthread_mutex_unlock(&g_rmu);
 }
 void mtl_reg_tex(int tid, const tex_t *t, const view_t *v) {
@@ -2522,7 +2528,7 @@ void mtl_reg_tex(int tid, const tex_t *t, const view_t *v) {
     pthread_mutex_lock(&g_rmu);
     if (id_ >= g_ntreg) { int n = id_ + 1024; g_treg = realloc(g_treg, n * sizeof *g_treg); memset(g_treg + g_ntreg, 0, (n - g_ntreg) * sizeof *g_treg); g_ntreg = n; }
     g_reg_gen++;
-    if (g_treg[id_].view) { defer_obj_unref((__bridge id)g_treg[id_].view); CFRelease(g_treg[id_].view); g_treg[id_].view = NULL; g_treg[id_].view_id = g_treg[id_].view_rid = 0; }
+    treg_drop_views(&g_treg[id_]);
     g_treg[id_].ok = t != NULL; if (t) g_treg[id_].t = *t; g_treg[id_].has_v = v != NULL; if (v) g_treg[id_].v = *v;
     if (id_ < (1 << 20)) atomic_store_explicit(&g_tser[id_], t ? t->serial : 0, memory_order_release);
     pthread_mutex_unlock(&g_rmu);
@@ -2559,7 +2565,7 @@ static id<MTLTexture> tex_by_id(int tid) {   // 调用方持 g_rmu | Caller hold
     if (v) {   // 序号表或客体内存有过变动：核基贴图是否被重传换新，换了则视图作废 | The serial table or guest memory has changed: check whether the base texture was re-uploaded and replaced; if so the view is invalidated
         id<MTLTexture> cur = tex_mtl(&rp->t);
         if (cur == v || v.parentTexture == cur) { rp->view_ser = sg; rp->view_dirty = dg; return v; }
-        defer_obj_unref(v); CFRelease(rp->view); rp->view = NULL; rp->view_rid = 0; v = nil;
+        treg_drop_views(rp); v = nil;
     }
     treg_t r = *rp;
     id<MTLTexture> base = tex_mtl(&rp->t);
@@ -2601,6 +2607,22 @@ static inline __attribute__((always_inline)) void *tex_fast(int tid) {
 static inline __attribute__((always_inline)) uint64_t tex_fast_rid(int tid, void **out) {
     if (tid > 0 && tid < g_ntreg && g_treg[tid].ok && g_treg[tid].view && g_treg[tid].view_ser == g_ser_gen && g_treg[tid].view_dirty == nvn_dirty_now()) { if (out) *out = g_treg[tid].view; return g_treg[tid].view_rid; }
     id<MTLTexture> t = tex_by_id(tid); if (out) *out = (__bridge void *)t; return t ? t.gpuResourceID._impl : 0;
+}
+// NVN 可以把单层 2D 图集交给数组采样指令；Metal 参数类型必须匹配，且字形通道重排必须保留。
+// NVN can sample a single-layer 2D atlas with array instructions; Metal needs a matching argument type and preserved glyph swizzles.
+static id<MTLTexture> tex_array_view(int tid, id<MTLTexture> source) {   // 调用方持 g_rmu | Caller holds g_rmu
+    treg_t *r = &g_treg[tid]; uint64_t rid = source.gpuResourceID._impl;
+    if (r->array_view && r->array_source_rid == rid) return (__bridge id<MTLTexture>)r->array_view;
+    if (r->array_view) { defer_obj_unref((__bridge id)r->array_view); CFRelease(r->array_view); r->array_view = NULL; }
+    r->array_source_rid = r->array_rid = 0;
+    id<MTLTexture> v = [source newTextureViewWithPixelFormat:source.pixelFormat textureType:MTLTextureType2DArray
+                 levels:NSMakeRange(0, source.mipmapLevelCount) slices:NSMakeRange(0, 1) swizzle:source.swizzle];
+    if (!v) { RED_ONCE(73, "Texture array view failed: tid=%d sourceType=%lu", tid, (unsigned long)source.textureType); return nil; }
+    r->array_view = (void *)CFBridgingRetain(v); r->array_source_rid = rid; r->array_rid = v.gpuResourceID._impl;
+    static int logged; if (logged++ < 8) MLOG("Texture array view: tid=%d ser=%llu %lux%lu layers=1 swizzle=%u,%u,%u,%u", tid,
+        (unsigned long long)r->t.serial, (unsigned long)v.width, (unsigned long)v.height,
+        (unsigned)source.swizzle.red, (unsigned)source.swizzle.green, (unsigned)source.swizzle.blue, (unsigned)source.swizzle.alpha);
+    return v;
 }
 static MTLSamplerAddressMode wrapm(int w) {
     switch (w) { case 0: case 7: return MTLSamplerAddressModeClampToEdge; case 1: return MTLSamplerAddressModeRepeat;
@@ -3169,6 +3191,9 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
         } else if (b->kind == NVN_RB_TEX || b->kind == NVN_RB_TEXU) {
             int tid = b->kind == NVN_RB_TEXU ? (int)(ubo_handle(nvn_stage, reg, b->off) & 0xfffff) : reg < 128 ? (int)(S.tex[nvn_stage][reg] & 0xfffff) : 0;
             void *tv = NULL; uint64_t trid = tid ? tex_fast_rid(tid, &tv) : 0; __unsafe_unretained id<MTLTexture> t = (__bridge id<MTLTexture>)tv;
+            if (t && tid > 0 && tid < g_ntreg && t.textureType == MTLTextureType2D && b->dtt == MTLTextureType2DArray) {
+                t = tex_array_view(tid, t); trid = t ? g_treg[tid].array_rid : 0;
+            }
             if (t && tid < g_ntreg) use_rec("tex", (uint64_t)g_treg[tid].t.mem, g_treg[tid].t.L.size, tid, &g_treg[tid].t);
             if (t && passdump() && tid < g_ntreg) PD("R %llu st%d ser=%llu", g_stat_pass, nvn_stage, g_treg[tid].t.serial);
             if (bl) PD("B %llu st%d tex reg%d tid=%d %s ser=%llu fmt=%lu %lux%lux%lu view_lv=%lu+%lu view_sl=%lu array=%lu target=%lu", g_stat_pass, nvn_stage, reg, tid, t ? "实" : "哑", t && tid < g_ntreg ? g_treg[tid].t.serial : 0ull,
