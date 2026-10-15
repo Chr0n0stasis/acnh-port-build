@@ -68,6 +68,8 @@ phase_verify() {
 }
 
 phase_host() {
+  clang -O1 -Wno-unused-function -Isource/dm/host/gen/acnh -Isource/dm/games/acnh source/dm/host/tests/t_bcat.c -o work/t_bcat > output/bcat-build.log 2>&1
+  work/t_bcat > output/bcat-test.log 2>&1
   python3 source/dm/tools/make_ext_font.py work/nintendo_ext.ttf
   clang -O1 -Wno-unused-function -Isource/dm/host/gen/acnh -Isource/dm/games/acnh source/dm/host/tests/t_sharedfont.c -o work/t_sharedfont > output/sharedfont-build.log 2>&1
   work/t_sharedfont '/System/Library/Fonts/Supplemental/Arial Unicode.ttf' work/nintendo_ext.ttf > output/sharedfont-test.log 2>&1
