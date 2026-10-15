@@ -631,6 +631,25 @@ index d90aef6..4590b9b 100644
  HLE_FORCE("_ZN2nn2fs12GetEntryTypeEPNS0_18DirectoryEntryTypeEPKc", "fsp-srv → stat(2)", Result, h_fs_GetEntryType, int32_t *out, const char *path) {
      HP(path); struct stat st;
      if (stat(hp, &st)) return err_res("stat", hp);
+diff --git a/dm/host/hle_sdkinit.c b/dm/host/hle_sdkinit.c
+index 26afed1..d37bc96 100644
+--- a/dm/host/hle_sdkinit.c
++++ b/dm/host/hle_sdkinit.c
+@@ -10,6 +10,14 @@
+ 
+ static void once(const char *what) { LOG("init 接管：%s（空操作）", what); }
+ 
++// oe 初始化不连 am 服务，SDK 的应用资源 ID 缓存保持为零；CPU 音频渲染器要求非零身份。
++// oe initialization does not connect to am, leaving the SDK resource-ID cache zero; the CPU audio renderer requires a nonzero identity.
++// 宿主每进程只运行一个应用；两层服务入口返回同一稳定 ID，不修改 SDK 内部地址。
++// The host runs one application per process; both service entry points return one stable ID without touching SDK-private addresses.
++static uint64_t applet_resource_id(void) { return 1; }
++HLE_FORCE("_ZN2nn6applet23GetAppletResourceUserIdEv", "应用服务由宿主实现；提供单应用的非零资源身份", uint64_t, h_applet_ResourceId, void) { return applet_resource_id(); }
++HLE_FORCE("_ZN2nn2am23GetAppletResourceUserIdEv", "am 初始化已接管；与 applet 层共用宿主资源身份", uint64_t, h_am_ResourceId, void) { return applet_resource_id(); }
++
+ HLE_FORCE("nndiagStartup", "连 lm 日志服务；诊断日志改由宿主直接输出", void, h_nndiagStartup, void) { once("nndiagStartup"); }
+ HLE_FORCE("_ZN2nn2oe10InitializeEv", "连 am/oe 运行环境服务；运行环境查询逐个接成宿主默认值", void, h_oe_Initialize, void) { once("oe::Initialize"); }
+ HLE_FORCE("_ZN2nn3aoc10InitializeEv", "追加内容(DLC)服务：不建会话（无服务进程）；已拥有清单由 hle_misc.c 的 aoc 接口给出（术士君临，非空）", void, h_aoc_Initialize, void) { once("aoc::Initialize"); }
 diff --git a/dm/host/hle_svc.c b/dm/host/hle_svc.c
 index 7547755..bcf059a 100644
 --- a/dm/host/hle_svc.c
