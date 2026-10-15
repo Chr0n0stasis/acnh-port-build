@@ -1,0 +1,30 @@
+name: ACNH geometry lowering probe
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  compile:
+    runs-on: macos-26
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch private probe inputs
+        run: |
+          test "$(gh repo view "$GITHUB_REPOSITORY" --json visibility --jq .visibility)" = PRIVATE
+          gh release download inputs-v2228224 --repo "$GITHUB_REPOSITORY" --pattern geometry-probe.zip
+          shasum -a 256 -c geometry-probe-sha256.txt
+          unzip -q geometry-probe.zip -d geometry-probe
+      - name: Compile compute and vertex programs
+        run: |
+          if ! xcrun -sdk iphoneos metal --version; then xcodebuild -downloadComponent MetalToolchain; fi
+          python3 ci/compile_geometry.py
+      - name: Upload probe diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: acnh-geometry-${{ github.run_number }}
+          path: geometry-output/
+          retention-days: 7
