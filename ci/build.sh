@@ -68,6 +68,8 @@ phase_verify() {
 }
 
 phase_host() {
+  clang -O1 -Wno-unused-function -Isource/dm/host/gen/acnh -Isource/dm/games/acnh source/dm/host/tests/t_audren20.c -o work/t_audren20 > output/audren20-build.log 2>&1
+  work/t_audren20 > output/audren20-test.log 2>&1
   clang -O1 -Wall -Wextra -Werror source/dm/host/tests/t_relr.c -o work/t_relr > output/relr-build.log 2>&1
   python3 source/dm/host/tests/test_relr_modules.py work/t_relr work/ExeFS work/patched work/verify work/relr-fixtures > output/relr-test.log 2>&1
   clang -O1 -Wno-unused-function -Isource/dm/host/gen/acnh -Isource/dm/games/acnh source/dm/host/tests/t_svc_heap.c -o work/t_svc_heap > output/svc-heap-build.log 2>&1

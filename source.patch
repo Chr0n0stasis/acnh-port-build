@@ -491,6 +491,59 @@ index 615d884..9c8d182 100644
  enum { R_AARCH64_ABS64 = 257, R_AARCH64_GLOB_DAT = 1025, R_AARCH64_JUMP_SLOT = 1026, R_AARCH64_RELATIVE = 1027 };
  #define ELF64_ST_BIND(i) ((i) >> 4)            // 符号绑定：0 = STB_LOCAL | symbol binding: 0 = STB_LOCAL
  #define ELF64_ST_VISIBILITY(o) ((o) & 3)       // 可见性：0 = STV_DEFAULT | visibility: 0 = STV_DEFAULT
+diff --git a/dm/host/hle_audren.c b/dm/host/hle_audren.c
+index c85df0c..9142db2 100644
+--- a/dm/host/hle_audren.c
++++ b/dm/host/hle_audren.c
+@@ -153,7 +153,35 @@ static int capture(const uint8_t *cl, int16_t *dst) {
+ // Render one frame (generate commands + CPU processing); dst = output (stereo int16, *nout samples). The two callers (render thread, catch-up) are serialized by a host lock: they share one command buffer
+ static pthread_mutex_t g_render_mu = PTHREAD_MUTEX_INITIALIZER;
+ static _Atomic uint64_t g_updates, g_renders, g_catchups;
++// SDK 20 内联了旧版 getter，并将命令生成接口改成 Span；直接使用 SDK 自己的完整 CPU 渲染路径。
++// SDK 20 inlines the old getters and changes generation to Span; use its complete CPU rendering path directly.
++static int sdk20_audio(void) {
++    void *p = guest_sym("_ZN2nn5audio6server17AudioRenderSystem19GenerateCommandImplENS_4SpanISt4byteEE");
++    module_t *m = p ? module_of(p) : NULL;
++    return m && !strcmp(m->build_id, "a226048605d3597f90cb1067d141cd36");
++}
++static _Thread_local struct { int active; const uint8_t *commands; } g_capture;
++HLE_FORCE("_ZN2nn5audio3dsp20CommandListProcessor5SetupEPKvm", "记录 SDK 自己生成并处理的命令表，供宿主提取 PCM 输出", void, h_ar_ProcessorSetup, void *proc, const void *commands, size_t size) {
++    static void (*orig)(void *, const void *, size_t);
++    if (!orig) orig = gsym("_ZN2nn5audio3dsp20CommandListProcessor5SetupEPKvm");
++    orig(proc, commands, size);
++    if (g_capture.active) g_capture.commands = commands;
++}
+ static Result render_once(uint8_t *sys, int16_t *dst, int *nout) {
++    if (sdk20_audio()) {
++        static Result (*exec)(void *);
++        if (!exec) exec = gsym("_ZN2nn5audio6server17AudioRenderSystem29ExecuteAudioRendererRenderingEv");
++        pthread_mutex_lock(&g_render_mu);
++        g_capture.active = 1; g_capture.commands = NULL;
++        Result r = exec(sys);
++        if (!r) {
++            atomic_fetch_add(&g_renders, 1);
++            if (dst && nout) *nout = g_capture.commands ? capture(g_capture.commands, dst) : 0;
++        }
++        g_capture.active = 0; g_capture.commands = NULL;
++        pthread_mutex_unlock(&g_render_mu);
++        return r;
++    }
+     static int (*mode)(void *), (*device)(void *); static uint8_t *(*cbuf)(void *); static size_t (*cbsz)(void *), (*gen)(void *, void *, size_t);
+     static void (*tmax)(void *, uint32_t), (*setup)(void *, const void *, size_t), (*process)(void *), (*lock)(void *), (*unlock)(void *);
+     if (!process) {
+@@ -206,7 +234,12 @@ HLE_FORCE("_ZN2nn5audio6server17AudioRenderSystem6UpdateEPvmS3_mPKvm", "渲染
+     }
+     static int tr = -1; if (tr < 0) tr = getenv("DM_AUDREN_TRACE") != NULL;
+     if (tr && u < 200) LOG("audren 更新 #%llu t=%.3f ms 距上次更新渲了 %llu 帧", (unsigned long long)u, now_ns() / 1e6, (unsigned long long)(atomic_load(&g_renders) - (last_r == ~0ull ? 0 : last_r)));
++    // SDK 20 的 Update 和手动渲染共享命令生成状态；用宿主锁串行，避免依赖旧版内部互斥锁偏移。
++    // SDK 20 Update and manual rendering share generation state; serialize with the host lock instead of an older private mutex offset.
++    int serialize = sdk20_audio();
++    if (serialize) pthread_mutex_lock(&g_render_mu);
+     Result res = orig(sys, o, on, p, pn, in, inn);
++    if (serialize) pthread_mutex_unlock(&g_render_mu);
+     last_r = atomic_load(&g_renders);
+     return res;
+ }
 diff --git a/dm/host/hle_fs.c b/dm/host/hle_fs.c
 index d90aef6..4590b9b 100644
 --- a/dm/host/hle_fs.c
