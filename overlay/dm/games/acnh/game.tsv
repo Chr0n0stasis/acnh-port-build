@@ -47,3 +47,4 @@ nvn_ubo_bases	cs=0x210
 nvn_c0_point_max	vs=0x610
 shader_groups	/Shader/Park_UBER=park /Shader/=engine /Effect/=effect /Layout/=layout /Model/=model
 shader_note	动森 3.0.3 着色器
+shader_geometry_pairs	geometry_pairs.tsv

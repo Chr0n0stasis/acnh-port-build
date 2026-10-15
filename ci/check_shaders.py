@@ -30,9 +30,27 @@ for row in checked:
 if problems:
     Path('output/shader-problems.txt').write_text('\n'.join(problems))
     raise SystemExit(f'Shader interface validation failed: {len(problems)} problems')
+geometry_programs = 0
+manifest_path = mac / '_geometry_manifest.json'
+if manifest_path.exists():
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest['compiled'] and manifest['chain'] == mac.name.removeprefix('b-')
+    assert {p['gs'] for p in manifest['pairs']} == geometry
+    for pair in manifest['pairs']:
+        metadata = json.loads((mac / pair['metadata']).read_text())
+        assert metadata['compiled'] and metadata['chain'] == manifest['chain']
+        assert metadata['vs'] == pair['vs'] and metadata['gs'] == pair['gs'] and metadata['ps'] == pair['ps']
+        assert len(metadata['programs']) == 3
+        for program in metadata['programs'].values():
+            for directory in (mac, ios):
+                assert (directory / program['library']).read_bytes()[:4] == b'MTLB'
+            geometry_programs += 1
 if deferred:
     Path('output/BRINGUP-LIMITATIONS.json').write_text(json.dumps({
         'status': 'experimental bring-up only, not a complete or verified playable port',
         'deferred_geometry_shaders': deferred,
+        'lowered_geometry_programs_compiled': geometry_programs,
+        'geometry_renderer_integrated': False,
         'requires_device_test': True}, indent=2))
 print(f'Compiled and checked {len(checked)} macOS/iOS shader libraries; deferred geometry: {len(deferred)}')
+if geometry_programs: print(f'Geometry lowering: {geometry_programs} compiled programs; renderer integration pending')
