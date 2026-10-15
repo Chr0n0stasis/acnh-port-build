@@ -15,6 +15,8 @@ for row in rows:
         if not lib.exists() or lib.read_bytes()[:4] != b'MTLB':
             problems.append(f'{root.name}/{key}: missing compiled Metal library')
     meta = json.loads((mac / (key + '.json')).read_text())
+    if meta.get('msl_entry_kind') not in {'vertex', 'fragment', 'kernel'}:
+        problems.append(f'{key}: no supported Metal entry point for stage {meta["stage"]}')
     if meta.get('drv_unfillable'):
         problems.append(f'{key}: unfillable driver reads {meta["drv_unfillable"]}')
     for binding in meta['bindings']:

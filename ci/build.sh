@@ -21,7 +21,7 @@ xcrun -sdk iphoneos metal --version
 brew install xcodegen llvm
 python3 -m venv "$ROOT/work/venv"
 source "$ROOT/work/venv/bin/activate"
-python3 -m pip install lz4 fonttools numpy Pillow zstandard
+python3 -m pip install lz4 capstone fonttools numpy Pillow zstandard
 
 git clone --depth 1 --branch vulkan-sdk-1.4.357.0 https://github.com/KhronosGroup/SPIRV-Cross.git work/spirv-cross
 cmake -S work/spirv-cross -B work/spirv-cross/build -DCMAKE_BUILD_TYPE=Release
