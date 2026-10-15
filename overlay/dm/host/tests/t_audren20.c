@@ -46,8 +46,8 @@ int main(void) {
     *(uint32_t *)(commands + 0x14) = 4;
     *(uint32_t *)(commands + 0x18) = 48000;
     uint8_t *sink = commands + 0x20;
-    *(uint32_t *)sink = 0xcafebabeu; sink[4] = 1; sink[5] = 0x13;
-    *(int16_t *)(sink + 6) = 0x140;
+    *(uint32_t *)sink = 0xcafebabeu; sink[4] = 1; sink[5] = 0x14;
+    *(int16_t *)(sink + 6) = 0x148;
     *(uint32_t *)(sink + 0x130) = 2;
     *(int16_t *)(sink + 0x136) = 1;
     CHECK(h_applet_ResourceId() == 1 && h_am_ResourceId() == h_applet_ResourceId());

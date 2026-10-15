@@ -492,10 +492,28 @@ index 615d884..9c8d182 100644
  #define ELF64_ST_BIND(i) ((i) >> 4)            // 符号绑定：0 = STB_LOCAL | symbol binding: 0 = STB_LOCAL
  #define ELF64_ST_VISIBILITY(o) ((o) & 3)       // 可见性：0 = STV_DEFAULT | visibility: 0 = STV_DEFAULT
 diff --git a/dm/host/hle_audren.c b/dm/host/hle_audren.c
-index c85df0c..9142db2 100644
+index c85df0c..b58a33a 100644
 --- a/dm/host/hle_audren.c
 +++ b/dm/host/hle_audren.c
-@@ -153,7 +153,35 @@ static int capture(const uint8_t *cl, int16_t *dst) {
+@@ -106,7 +106,7 @@ HLE_FORCE("_ZN2nn5audio18CloseAudioRendererENS0_19AudioRendererHandleE", "关渲
+ }
+ 
+ // 取 DeviceSink 的输入混音缓冲 → int16 立体声 | DeviceSink input mix buffers → int16 stereo
+-static int capture(const uint8_t *cl, int16_t *dst) {
++static int capture(const uint8_t *cl, int16_t *dst, unsigned sink_id) {
+     uint32_t ncmd = *(const uint32_t *)(cl + 4), samples = *(const uint32_t *)(cl + 0x14), rate = *(const uint32_t *)(cl + 0x18);
+     const int32_t *mix = *(const int32_t *const *)(cl + 8);
+     static int logged;
+@@ -120,7 +120,7 @@ static int capture(const uint8_t *cl, int16_t *dst) {
+     for (uint32_t i = 0; i < ncmd; i++) {
+         uint32_t magic = *(const uint32_t *)c; int16_t size = *(const int16_t *)(c + 6);
+         if (magic != 0xcafebabeu || size <= 0) { if (!logged++) LOG("【红】audren：命令表第 %u 条格式不对（魔数 %#x 大小 %d）", i, magic, size); return 0; }
+-        if (c[5] == 0x13 && c[4]) {
++        if (c[5] == sink_id && c[4]) {
+             uint32_t nin = *(const uint32_t *)(c + 0x130); const int16_t *in = (const int16_t *)(c + 0x134);
+             const int32_t *up = *(const int32_t *const *)(c + 0x128);
+             if (!logged++) LOG("audren：DeviceSink 输入 %u 个（%d %d …）采样率 %u 每帧 %u 混音缓冲 %p 上采样缓冲 %p", nin, nin ? in[0] : -1, nin > 1 ? in[1] : -1, rate, samples, (void *)mix, (void *)up);
+@@ -153,7 +153,37 @@ static int capture(const uint8_t *cl, int16_t *dst) {
  // Render one frame (generate commands + CPU processing); dst = output (stereo int16, *nout samples). The two callers (render thread, catch-up) are serialized by a host lock: they share one command buffer
  static pthread_mutex_t g_render_mu = PTHREAD_MUTEX_INITIALIZER;
  static _Atomic uint64_t g_updates, g_renders, g_catchups;
@@ -522,7 +540,9 @@ index c85df0c..9142db2 100644
 +        Result r = exec(sys);
 +        if (!r) {
 +            atomic_fetch_add(&g_renders, 1);
-+            if (dst && nout) *nout = g_capture.commands ? capture(g_capture.commands, dst) : 0;
++            // SDK 20 的 DeviceSink 命令号为 0x14；字段仍为 +0x128/+0x130/+0x134。
++            // SDK 20 uses DeviceSink ID 0x14; its fields remain at +0x128/+0x130/+0x134.
++            if (dst && nout) *nout = g_capture.commands ? capture(g_capture.commands, dst, 0x14) : 0;
 +        }
 +        g_capture.active = 0; g_capture.commands = NULL;
 +        pthread_mutex_unlock(&g_render_mu);
@@ -531,7 +551,16 @@ index c85df0c..9142db2 100644
      static int (*mode)(void *), (*device)(void *); static uint8_t *(*cbuf)(void *); static size_t (*cbsz)(void *), (*gen)(void *, void *, size_t);
      static void (*tmax)(void *, uint32_t), (*setup)(void *, const void *, size_t), (*process)(void *), (*lock)(void *), (*unlock)(void *);
      if (!process) {
-@@ -206,7 +234,12 @@ HLE_FORCE("_ZN2nn5audio6server17AudioRenderSystem6UpdateEPvmS3_mPKvm", "渲染
+@@ -174,7 +204,7 @@ static Result render_once(uint8_t *sys, int16_t *dst, int *nout) {
+     atomic_fetch_add(&g_renders, 1);
+     uint64_t proc[16] __attribute__((aligned(16))) = {0};   // CommandListProcessor（0x58 字节）| CommandListProcessor (0x58 bytes)
+     tmax(proc, 0xffffffffu); setup(proc, cl, n); process(proc);
+-    if (dst) *nout = capture(cl, dst);
++    if (dst) *nout = capture(cl, dst, 0x13);
+     // 每帧渲染耗时（5 ms 一帧的预算）：每 2000 帧报均值 / 最大 | render time per frame (budget: 5 ms per frame): mean / max every 2000 frames
+     static uint64_t sum, mx, cnt; uint64_t d = now_ns() - t0; sum += d; if (d > mx) mx = d;
+     if (++cnt == 2000) { LOG("audren：渲染耗时 均 %.2f ms / 最大 %.2f ms（每帧 5 ms 预算，最近 2000 帧）；追帧累计 %llu 次", sum / 2000 / 1e6, mx / 1e6, (unsigned long long)atomic_load(&g_catchups)); sum = mx = cnt = 0; }
+@@ -206,7 +236,12 @@ HLE_FORCE("_ZN2nn5audio6server17AudioRenderSystem6UpdateEPvmS3_mPKvm", "渲染
      }
      static int tr = -1; if (tr < 0) tr = getenv("DM_AUDREN_TRACE") != NULL;
      if (tr && u < 200) LOG("audren 更新 #%llu t=%.3f ms 距上次更新渲了 %llu 帧", (unsigned long long)u, now_ns() / 1e6, (unsigned long long)(atomic_load(&g_renders) - (last_r == ~0ull ? 0 : last_r)));
