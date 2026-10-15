@@ -23,6 +23,9 @@ phase_prepare() {
   git -C source checkout --detach FETCH_HEAD
   git -C source apply "$ROOT/source.patch"
   cp -R overlay/. source/
+  if [[ "${DM_GEOMETRY_RUNTIME:-0}" = 1 ]]; then
+    cp -R geometry-runtime-source/. source/
+  fi
 
   xcodebuild -version
   uname -m

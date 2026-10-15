@@ -34,4 +34,8 @@ test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$ROOT/output/Pay
 python3 -c 'import plistlib,sys; from pathlib import Path; p=Path(sys.argv[1]); i=plistlib.loads((p/"Info.plist").read_bytes()); assert i["CFBundleIcons"]["CFBundlePrimaryIcon"]["CFBundleIconName"] == "AppIcon"; assert (p/"Assets.car").is_file()' "$ROOT/output/Payload/DmIOS.app"
 cd "$ROOT/output"
 zip -qry ACNHMobile-bringup-unsigned.ipa Payload
-printf 'Experimental bring-up IPA, not a complete or verified playable port. Geometry lowering programs are compiled, but renderer integration remains incomplete; see BRINGUP-LIMITATIONS.json. Complete RomFS belongs in Documents/romfs. Returned device logs establish only the startup stages they reach; gameplay still needs device verification.\n' > IPA-STATUS.txt
+if [[ "${DM_GEOMETRY_RUNTIME:-0}" = 1 ]]; then
+  printf 'Experimental bring-up IPA with geometry compute/draw integration and matching compiled shader chain. Target-device rendering and gameplay remain unverified. Complete RomFS belongs in Documents/romfs.\n' > IPA-STATUS.txt
+else
+  printf 'Experimental bring-up IPA, not a complete or verified playable port. Geometry lowering programs are compiled, but renderer integration remains incomplete; see BRINGUP-LIMITATIONS.json. Complete RomFS belongs in Documents/romfs. Returned device logs establish only the startup stages they reach; gameplay still needs device verification.\n' > IPA-STATUS.txt
+fi

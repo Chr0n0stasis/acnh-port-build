@@ -1,9 +1,11 @@
 import json
+import os
 import sys
 from pathlib import Path
 
 mac, ios = map(Path, sys.argv[1:3])
 bringup = '--bringup' in sys.argv[3:]
+integrated_geometry = os.environ.get('DM_GEOMETRY_RUNTIME') == '1'
 geometry = {c[3] for line in Path('source/dm/games/acnh/shader_map.tsv').read_text().splitlines()
             if len(c := line.split('\t')) > 4 and c[2] == '几何'}
 rows = json.loads((mac / '_b_build.json').read_text())
@@ -39,6 +41,8 @@ if manifest_path.exists():
     for pair in manifest['pairs']:
         metadata = json.loads((mac / pair['metadata']).read_text())
         assert metadata['compiled'] and metadata['chain'] == manifest['chain']
+        if integrated_geometry:
+            assert metadata['attribute_layout'] == 'draw-order-float4'
         assert metadata['vs'] == pair['vs'] and metadata['gs'] == pair['gs'] and metadata['ps'] == pair['ps']
         assert len(metadata['programs']) == 3
         for program in metadata['programs'].values():
@@ -50,7 +54,8 @@ if deferred:
         'status': 'experimental bring-up only, not a complete or verified playable port',
         'deferred_geometry_shaders': deferred,
         'lowered_geometry_programs_compiled': geometry_programs,
-        'geometry_renderer_integrated': False,
+        'geometry_renderer_integrated': integrated_geometry,
         'requires_device_test': True}, indent=2))
 print(f'Compiled and checked {len(checked)} macOS/iOS shader libraries; deferred geometry: {len(deferred)}')
-if geometry_programs: print(f'Geometry lowering: {geometry_programs} compiled programs; renderer integration pending')
+if geometry_programs:
+    print(f'Geometry lowering: {geometry_programs} compiled programs; renderer {"included; target-device verification pending" if integrated_geometry else "integration pending"}')
