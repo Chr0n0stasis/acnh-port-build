@@ -77,6 +77,18 @@ jobs:
             output/msl-mac/b-${{ steps.prepare.outputs.chain }}
             output/msl-ios/b-${{ steps.prepare.outputs.chain }}
           key: acnh-shaders-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('input-sha256.txt') }}-${{ steps.prepare.outputs.chain }}-${{ hashFiles('source/dm/games/acnh/bf_want.tsv') }}
+      - name: Migrate matching legacy shader cache on first use
+        if: steps.shader-cache.outputs.cache-hit != 'true'
+        id: legacy-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            work/toolbin
+            output/msl-mac
+            output/msl-ios
+          key: acnh-apple-${{ runner.os }}-${{ runner.arch }}-${{ inputs.geometry_runtime && format('geometry-{0}-', hashFiles('geometry-runtime-source/**')) || '' }}migration
+          restore-keys: |
+            acnh-apple-${{ runner.os }}-${{ runner.arch }}-${{ inputs.geometry_runtime && format('geometry-{0}-', hashFiles('geometry-runtime-source/**')) || '' }}
       - name: Verify ARM64 rewrite structure
         if: ${{ inputs.verify_rewrite }}
         run: bash ci/build.sh verify
@@ -95,6 +107,9 @@ jobs:
           if-no-files-found: warn
       - name: Reuse or compile Metal shaders
         id: shaders
+        env:
+          DM_LEGACY_CACHE: ${{ steps.legacy-cache.outputs.cache-matched-key != '' && '1' || '0' }}
+          DM_LEGACY_SHADER_RUN: ${{ inputs.geometry_runtime && '38729191755' || '38755088464' }}
         run: bash ci/build.sh shaders
         timeout-minutes: 30
       - name: Build unsigned iOS bring-up app

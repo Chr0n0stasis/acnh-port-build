@@ -111,13 +111,18 @@ phase_host() {
 }
 
 phase_shaders() {
-  if [[ -f "output/msl-mac/b-$CHAIN/_b_build.json" ]] &&
+  local use_cache=1
+  if [[ "${DM_LEGACY_CACHE:-0}" = 1 ]]; then
+    python3 source/dm/gfx/tools/dmsh_chain.py --check-tools
+    python3 ci/reuse_shaders.py "$DM_LEGACY_SHADER_RUN" "$CHAIN"
+  fi
+  if [[ "$use_cache" = 1 && -f "output/msl-mac/b-$CHAIN/_b_build.json" ]] &&
      python3 ci/check_shaders.py "output/msl-mac/b-$CHAIN" "output/msl-ios/b-$CHAIN" --bringup; then
     echo "Reusing compiled shader chain $CHAIN; shader compiler skipped"
     printf '{"chain":"%s","source":"matching-chain-cache"}\n' "$CHAIN" > output/shader-reuse.json
   else
     export IOSOUT="$ROOT/output/msl-ios"
-    python3 source/dm/gfx/tools/dmsh_build.py "$ROOT/work/shader-pkg" "$ROOT/output/msl-mac" > output/shaders.log 2>&1
+    python3 ci/run_shaders.py "$CHAIN"
     python3 ci/check_shaders.py "output/msl-mac/b-$CHAIN" "output/msl-ios/b-$CHAIN" --bringup
   fi
   python3 source/dm/gfx/tools/c1_guard.py "output/msl-mac/b-$CHAIN" source/dm/games/acnh/c1_full.tsv

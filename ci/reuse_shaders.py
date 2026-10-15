@@ -59,5 +59,5 @@ def main():
 try:
     main()
 except Exception as error:
-    print(f'Compiled shader reuse unavailable ({type(error).__name__}: {error}); performing full shader build')
+    print(f'Compiled shader reuse unavailable ({type(error).__name__}: {error}); stopping rather than silently rebuilding')
     raise SystemExit(2)

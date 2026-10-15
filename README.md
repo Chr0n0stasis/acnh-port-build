@@ -21,3 +21,6 @@ checksum, and shader variant list. Host-only fixes do not invalidate them. No ru
 ID is required. A new chain or missing cache compiles once and saves only that
 chain's output, excluding the large per-shader CAS and old chains. SPIRV-Cross has
 a separate versioned cache. The IPA uploads before the shader cache is saved.
+On the first use of the new cache, matching legacy output is restored and checked
+against a successful same-input, same-chain build before reuse. Cold compilation
+prints progress every 30 seconds, including translated shaders and built libraries.
