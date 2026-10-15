@@ -480,7 +480,7 @@ index d689496..152d11c 100644
 +dmhost: $(SRC) $(GFX) dm.h dm_relr.h hle.h dm_input.h front.h touch_mac.h ../ios/Sources/dm_touch_controls.[ch] $(GFX_H) $(GAME_H) $(GAME_DIR)/dmsh_chain.h $(GAME_STAMP) $(VPX_LIB)
 +	clang $(CFLAGS) -I../gfx/nvn/include -I$(dir $(GAME_H)) -I$(GAME_DIR) -I$(VPX) -fobjc-arc -o $@ $(SRC) $(GFX) $(VPX_LIB) -framework Cocoa -framework CoreFoundation -framework QuartzCore -framework Metal -framework AudioToolbox -framework ImageIO -framework UniformTypeIdentifiers
 diff --git a/dm/host/dm.h b/dm/host/dm.h
-index 615d884..9c8d182 100644
+index 615d884..668b117 100644
 --- a/dm/host/dm.h
 +++ b/dm/host/dm.h
 @@ -19,7 +19,7 @@ typedef struct { uint8_t *d; size_t n; } dm_blob;   // 整份读进内存的一
@@ -492,6 +492,14 @@ index 615d884..9c8d182 100644
  enum { R_AARCH64_ABS64 = 257, R_AARCH64_GLOB_DAT = 1025, R_AARCH64_JUMP_SLOT = 1026, R_AARCH64_RELATIVE = 1027 };
  #define ELF64_ST_BIND(i) ((i) >> 4)            // 符号绑定：0 = STB_LOCAL | symbol binding: 0 = STB_LOCAL
  #define ELF64_ST_VISIBILITY(o) ((o) & 3)       // 可见性：0 = STV_DEFAULT | visibility: 0 = STV_DEFAULT
+@@ -54,6 +54,7 @@ extern pthread_key_t g_key18, g_keytls, g_keytlr, g_keygate;
+ extern pthread_key_t g_keyres[2], g_keyaspect, g_keyaspectui;
+ 
+ void load_modules(const char *dir, const char **names, int n);
++unsigned dm_check_hle_registry(void);
+ void run_module_inits(void);
+ void *module_sym(module_t *m, const char *name);
+ void *guest_sym(const char *name);
 diff --git a/dm/host/hle_audren.c b/dm/host/hle_audren.c
 index c85df0c..b58a33a 100644
 --- a/dm/host/hle_audren.c
@@ -735,10 +743,24 @@ index 53ff6a3..fadd439 100644
  // nn::util::Uuid 16 bytes: a fixed local value (only used to tell devices apart locally, networking is cut)
  HLE_FORCE("_ZN2nn2oe17GetPseudoDeviceIdEPNS_4util4UuidE", "伪设备号；宿主固定值", void, h_oe_GetDevId, uint8_t *uuid) {
 diff --git a/dm/host/hle_sdk16.c b/dm/host/hle_sdk16.c
-index 3917a91..95e6477 100644
+index 3917a91..1c4093f 100644
 --- a/dm/host/hle_sdk16.c
 +++ b/dm/host/hle_sdk16.c
-@@ -56,66 +56,6 @@ HLE_FORCE("_ZN2nn4time39AsyncEnsureNetworkClockAvailabilityTask9StartTaskEv", "
+@@ -39,11 +39,8 @@ HLE_FORCE("_ZN2nn4time19ToCalendarTimeInUtcERKNS0_9PosixTimeE", "绝对秒 → U
+     return (uint64_t)(uint16_t)(tm.tm_year + 1900) | (uint64_t)(uint8_t)(tm.tm_mon + 1) << 16 | (uint64_t)(uint8_t)tm.tm_mday << 24 |
+            (uint64_t)(uint8_t)tm.tm_hour << 32 | (uint64_t)(uint8_t)tm.tm_min << 40 | (uint64_t)(uint8_t)tm.tm_sec << 48;
+ }
+-// LocationName = char[0x24]（时区名）：跟宿主系统时区
+-// LocationName = char[0x24] (time zone name): follows the host's system time zone
+-HLE_FORCE("_ZN2nn4time21GetDeviceLocationNameEPNS0_12LocationNameE", "设备时区名 → 宿主时区", Result, h_time_LocName, char *out) {
+-    memset(out, 0, 0x24); tzset(); strlcpy(out, tzname[0] && *tzname[0] ? tzname[0] : "UTC", 0x24); return RES_OK;
+-}
++// 设备时区与完整规则转换统一由 hle_time_zone.c 提供，避免同一符号重复接管。
++// Device location and rule conversion are provided together by hle_time_zone.c to avoid duplicate takeovers.
+ HLE_FORCE("_ZN2nn4time26StandardNetworkSystemClock14GetCurrentTimeEPNS0_9PosixTimeE", "网络时钟（离线，不可用）", Result, h_time_NetNow, int64_t *out) { (void)out; return RES_FAIL; }
+ HLE_FORCE("_ZN2nn4time8FinalizeEv", "与 Initialize 配对；宿主无会话", Result, h_time_Finalize, void) { return RES_OK; }
+ // 「确保网络时钟可用」异步任务：不发请求，完成事件立即触发、结果失败。对象本身不动（构造 / 析构空操作），事件放宿主静态区
+@@ -56,66 +53,6 @@ HLE_FORCE("_ZN2nn4time39AsyncEnsureNetworkClockAvailabilityTask9StartTaskEv", "
  HLE_FORCE("_ZN2nn4time39AsyncEnsureNetworkClockAvailabilityTask14GetFinishEventEv", "网络时钟任务完成事件：已触发", void *, h_time_NcEvent, void *self) { (void)self; hle_signal_system_event(g_ev_netclock); return g_ev_netclock; }
  HLE_FORCE("_ZN2nn4time39AsyncEnsureNetworkClockAvailabilityTask9GetResultEv", "网络时钟任务结果：离线，失败", Result, h_time_NcResult, void *self) { (void)self; return RES_FAIL; }
  
@@ -873,7 +895,7 @@ index 60160cc..b5883d8 100644
  // 哪几处：返回点落在地带函数 0x58f1e0 起的那一簇（0x58f1e0–0x591440），或返回后 8 条指令内调地带日程 0x58f310（服务端 0x636b38 套地带、0x694b48 等 9 处）。
  // 过期：dm_bossrush 每拍续 1 秒，本局停拍（退出 / 崩溃）后不再生效，下一局建局时取到的是真实时钟。
 diff --git a/dm/host/loader.c b/dm/host/loader.c
-index bb94f7a..0950f47 100644
+index bb94f7a..3fe892f 100644
 --- a/dm/host/loader.c
 +++ b/dm/host/loader.c
 @@ -11,6 +11,7 @@
@@ -884,7 +906,23 @@ index bb94f7a..0950f47 100644
  
  module_t g_mod[MAX_MOD];
  int g_nmod;
-@@ -202,7 +203,36 @@ static void register_gates(module_t *m, const char *dir) {
+@@ -129,7 +130,14 @@ static void force_init(void) {
+     g_force_hits = calloc(g_nforce + 1, sizeof *g_force_hits);
+     for (unsigned i = 0; i < g_nforce; i++)
+         for (unsigned j = i + 1; j < g_nforce; j++)
+-            if (!strcmp(g_force[i].name, g_force[j].name)) die("强制接管清单重复：%s", g_force[i].name);
++            if (!strcmp(g_force[i].name, g_force[j].name)) die("【红】强制接管清单重复：%s", g_force[i].name);
++}
++// CI 直接检查链接后实际注册表，复用装载器的重复检测；无需启动游戏或图形设备。
++// CI checks the linked registry with the loader's own duplicate detection, without starting the game or graphics device.
++unsigned dm_check_hle_registry(void) {
++    force_init();
++    if (!g_nforce) die("【红】强制接管清单为空");
++    return g_nforce;
+ }
+ static void *force_lookup(const char *name) {
+     for (unsigned i = 0; i < g_nforce; i++)
+@@ -202,7 +210,36 @@ static void register_gates(module_t *m, const char *dir) {
      LOG("%s: gates %d patch_off %#llx keys %lu/%lu/%lu/%lu", m->name, ng, m->patch_off, g_key18, g_keytls, g_keytlr, g_keygate);
  }
  
@@ -921,7 +959,7 @@ index bb94f7a..0950f47 100644
      uint64_t rela = 0, relasz = 0, jmprel = 0, pltsz = 0;
      for (const Elf64_Dyn *d = m->dyn; d->d_tag; d++) switch (d->d_tag) {
          case DT_RELA: rela = d->d_un.d_ptr; break;
-@@ -238,6 +268,7 @@ static void relocate(module_t *m) {
+@@ -238,6 +275,7 @@ static void relocate(module_t *m) {
              else { *where = v + r->r_addend; cnt[1]++; }       // ABS64 / GLOB_DAT
          }
      LOG("%s: reloc relative=%d abs/glob=%d jump=%d%s", m->name, cnt[0], cnt[1], cnt[2], nint ? "（含绑到先装模块的定义） | (some bound to an earlier module's definition)" : "");
@@ -929,7 +967,7 @@ index bb94f7a..0950f47 100644
      if (nint > 8) LOG("%s: 共 %d 处绑到先装模块的定义 | %d bound to an earlier module's definition in all", m->name, nint, nint);
  }
  
-@@ -248,6 +279,16 @@ static void relocate(module_t *m) {
+@@ -248,6 +286,16 @@ static void relocate(module_t *m) {
  // Module base addresses and host ASLR differ every run, and only the values of the relocation slots change with them: copy the image and, using the same relocation table, replace every slot with an address-independent token --
  // RELATIVE → (0, addend); symbol target falls in some module → (1 + module number, offset within the module); otherwise (host forced take-over / host symbol) → (name FNV, addend); all other bytes as is.
  #include <CommonCrypto/CommonDigest.h>
@@ -946,7 +984,7 @@ index bb94f7a..0950f47 100644
  void loader_hash_log(void) {
      if (!getenv("DM_LOADHASH")) return;
      for (int k = 0; k < g_nmod; k++) {
-@@ -272,7 +313,14 @@ void loader_hash_log(void) {
+@@ -272,7 +320,14 @@ void loader_hash_log(void) {
                  memcpy(cp + r->r_offset, &tok[0], 8);                // 槽 8 字节换成记号头；记号尾在下面按槽序追加 | The 8 slot bytes are replaced by the token head; the token tail is appended below in slot order
                  nslot++;
              }
@@ -961,6 +999,21 @@ index bb94f7a..0950f47 100644
          for (int t = 0; t < 2; t++)                                // 记号尾（加数 / 偏移）按槽序追加，与槽头一起唯一确定槽值 | Token tails (addend / offset) are appended in slot order, and together with the slot head uniquely determine the slot value
              for (uint64_t i = 0; i < sizes[t] / sizeof(Elf64_Rela); i++) {
                  const Elf64_Rela *r = &tabs[t][i]; uint64_t tail = (uint64_t)r->r_addend;
+diff --git a/dm/host/main.c b/dm/host/main.c
+index 9c44103..9626526 100644
+--- a/dm/host/main.c
++++ b/dm/host/main.c
+@@ -130,6 +130,10 @@ void dm_host_preload_start(int argc, char **argv) {
+     if (pthread_create(&g_pre.th, &a, preload_thread, NULL)) die("dm_host_preload_start：起线程失败");
+ }
+ int main(int argc, char **argv) {
++    if (argc == 2 && !strcmp(argv[1], "--check-hle")) {
++        printf("HLE_FORCE registry valid: %u entries\n", dm_check_hle_registry());
++        return 0;
++    }
+     if (getenv("DM_PRELOAD")) dm_host_preload_start(argc, argv);   // Mac 上验证提前起跑的路径（iOS 由 App 的 main() 调） | Exercise the early-start path on Mac (on iOS it is called from the App's main())
+     if (atomic_load(&g_pre.started)) {
+         pthread_join(g_pre.th, NULL);
 diff --git a/dm/host/tests/t_fs.c b/dm/host/tests/t_fs.c
 index 57de93d..393b68e 100644
 --- a/dm/host/tests/t_fs.c
