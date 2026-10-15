@@ -713,6 +713,26 @@ index d90aef6..4590b9b 100644
  HLE_FORCE("_ZN2nn2fs12GetEntryTypeEPNS0_18DirectoryEntryTypeEPKc", "fsp-srv → stat(2)", Result, h_fs_GetEntryType, int32_t *out, const char *path) {
      HP(path); struct stat st;
      if (stat(hp, &st)) return err_res("stat", hp);
+diff --git a/dm/host/hle_oe.c b/dm/host/hle_oe.c
+index 53ff6a3..fadd439 100644
+--- a/dm/host/hle_oe.c
++++ b/dm/host/hle_oe.c
+@@ -284,6 +284,15 @@ HLE_FORCE("_ZN2nn2oe18GetDesiredLanguageEv", "系统语言查询；按 DM_LANG 
+     return v;
+ }
+ 
++// 地区与语言独立：宿主默认美洲（1），DM_REGION 可选 0 日本 / 1 美洲 / 2 欧洲 / 3 澳新 / 4 港台韩 / 5 中国。
++// Region is independent of language: default Americas (1); DM_REGION selects 0 Japan / 1 Americas / 2 Europe / 3 Australia-NZ / 4 HK-TW-Korea / 5 China.
++// 只接管公开 oe 查询，不让设置服务进入 Switch IPC；枚举见 libnx services/set.h 的 SetRegion。
++// Take over the public oe query without entering Switch settings IPC; see SetRegion in libnx services/set.h.
++HLE_FORCE("_ZN2nn2oe13GetRegionCodeEv", "主机地区：按 DM_REGION 返回合法枚举，不连接 Switch 设置服务", int, h_oe_GetRegion, void) {
++    const char *e = getenv("DM_REGION");
++    return e && e[0] >= '0' && e[0] <= '5' && !e[1] ? e[0] - '0' : 1;
++}
++
+ // nn::util::Uuid 16 字节：本机固定值（只用于本地区分设备，联网已剪）
+ // nn::util::Uuid 16 bytes: a fixed local value (only used to tell devices apart locally, networking is cut)
+ HLE_FORCE("_ZN2nn2oe17GetPseudoDeviceIdEPNS_4util4UuidE", "伪设备号；宿主固定值", void, h_oe_GetDevId, uint8_t *uuid) {
 diff --git a/dm/host/hle_sdk16.c b/dm/host/hle_sdk16.c
 index 3917a91..95e6477 100644
 --- a/dm/host/hle_sdk16.c
@@ -967,6 +987,25 @@ index 57de93d..393b68e 100644
      // 语言开关改写设置文件（settings_lang_apply）：期望值按规则手算——只在「与开关不符」时把 Language / VoiceLanguage 改成 0（英文）或 8（简中），别的键和别的语言不动
      // Language switch rewriting the settings file (settings_lang_apply): expected values computed by hand from the rule -- only when it "does not match the switch" are Language / VoiceLanguage changed to 0 (English) or 8 (Simplified Chinese); other keys and other languages are untouched
      { extern int g_t_lang; char sd[1200], sf[1300], gotj[512]; snprintf(sd, sizeof sd, "%s/langt", root); mkdir(sd, 0755); snprintf(sf, sizeof sf, "%s/Settings", sd); mkdir(sf, 0755); snprintf(sf, sizeof sf, "%s/Settings/Settings.json", sd);
+diff --git a/dm/host/tests/t_oe.c b/dm/host/tests/t_oe.c
+index 111ff7a..b75e3eb 100644
+--- a/dm/host/tests/t_oe.c
++++ b/dm/host/tests/t_oe.c
+@@ -132,6 +132,14 @@ static void test_scale3d(void) {
+     CHECK(a == 0 && b == 0, "动态比例：实玩第二段的慢帧序列（帧率 59+）不论散开还是挤在一起都不换级");
+ }
+ int main(void) {
++    // 地区不是语言；拒绝越界和非整串枚举，防止游戏索引地区表时越界。
++    // Region is not language; reject out-of-range and partial enum strings before games index their region tables.
++    unsetenv("DM_REGION"); CHECK(h_oe_GetRegion() == 1, "默认地区美洲");
++    setenv("DM_LANG", "zh-Hans", 1); CHECK(h_oe_GetRegion() == 1, "地区独立于简体中文语言");
++    for (int i = 0; i <= 5; i++) { char s[2] = {(char)('0' + i), 0}; setenv("DM_REGION", s, 1); CHECK(h_oe_GetRegion() == i, "六种有效地区"); }
++    const char *bad_regions[] = {"", "-1", "6", "99", "1garbage", " 2", "China", "2147483648"};
++    for (unsigned i = 0; i < sizeof bad_regions / sizeof *bad_regions; i++) { setenv("DM_REGION", bad_regions[i], 1); CHECK(h_oe_GetRegion() == 1, "非法地区回退美洲"); }
++    unsetenv("DM_REGION"); unsetenv("DM_LANG");
+     test_scale3d();
+     unsetenv("DM_OE_SCRIPT"); reset();
+     CHECK(empty(), "初始空队列：返回false且不改输出");
 diff --git a/dm/ios/Sources/front_ios.m b/dm/ios/Sources/front_ios.m
 index 9555b92..f7a6dc8 100644
 --- a/dm/ios/Sources/front_ios.m

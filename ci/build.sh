@@ -82,6 +82,8 @@ phase_host() {
   work/t_svc_heap > output/svc-heap-test.log 2>&1
   make -C source/dm/host GAME=acnh > output/host-build.log 2>&1
   cp source/dm/host/dmhost output/dmhost
+  make -C source/dm/host/tests GAME=acnh build/t_oe > output/oe-build.log 2>&1
+  source/dm/host/tests/build/t_oe > output/oe-test.log 2>&1
   make -C source/dm/host/tests GAME=acnh build/t_fs > output/fs-build.log 2>&1
   source/dm/host/tests/build/t_fs > output/fs-test.log 2>&1
   make -C source/dm/host/tests GAME=acnh build/t_fs_case > output/fs-case-build.log 2>&1
