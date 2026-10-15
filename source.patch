@@ -467,6 +467,17 @@ index bea0206..48ba7bd 100644
      keys = {}
      # 第一遍：全部文件；Unity 资源包带类型树，顺手收下 Shader 的树。第二遍：没带类型树的 Unity 序列化文件借这些树再扫
      # First pass: every file; Unity bundles carry type trees, and the Shader trees are collected on the way. Second pass: Unity serialized files without type trees are scanned again with the borrowed trees
+diff --git a/dm/host/Makefile b/dm/host/Makefile
+index d689496..692ee0a 100644
+--- a/dm/host/Makefile
++++ b/dm/host/Makefile
+@@ -54,5 +54,5 @@ $(GAME_STAMP): FORCE
+ 	@mkdir -p gen; echo $(GAME) | cmp -s - $@ || echo $(GAME) > $@
+ .PHONY: FORCE
+ FORCE:
+-dmhost: $(SRC) $(GFX) dm.h hle.h dm_input.h front.h touch_mac.h ../ios/Sources/dm_touch_controls.[ch] $(GFX_H) $(GAME_H) $(GAME_DIR)/dmsh_chain.h $(GAME_STAMP) $(VPX_LIB)
++dmhost: $(SRC) $(GFX) dm.h dm_relr.h hle.h dm_input.h front.h touch_mac.h ../ios/Sources/dm_touch_controls.[ch] $(GFX_H) $(GAME_H) $(GAME_DIR)/dmsh_chain.h $(GAME_STAMP) $(VPX_LIB)
+ 	clang $(CFLAGS) -I../gfx/nvn/include -I$(dir $(GAME_H)) -I$(GAME_DIR) -I$(VPX) -fobjc-arc -o $@ $(SRC) $(GFX) $(VPX_LIB) -framework Cocoa -framework QuartzCore -framework Metal -framework AudioToolbox -framework ImageIO -framework UniformTypeIdentifiers
 diff --git a/dm/host/dm.h b/dm/host/dm.h
 index 615d884..9c8d182 100644
 --- a/dm/host/dm.h
@@ -636,7 +647,7 @@ index 7547755..bcf059a 100644
          case I_DebuggerAttached: v = 0; break;
          case I_RandomEntropy: { uint64_t dm_entropy64(void); v = dm_entropy64(); break; }   // DM_DETCLOCK 开时为确定流（hle_os.c） | a deterministic stream when DM_DETCLOCK is on (hle_os.c)
 diff --git a/dm/host/loader.c b/dm/host/loader.c
-index bb94f7a..71c6943 100644
+index bb94f7a..0950f47 100644
 --- a/dm/host/loader.c
 +++ b/dm/host/loader.c
 @@ -11,6 +11,7 @@
@@ -671,7 +682,7 @@ index bb94f7a..71c6943 100644
 +    // 禁止写签名代码、补丁/键页和重定位表；完整校验后才应用。
 +    // Never write signed code, patch/key pages or the relocation table; apply only after full validation.
 +    int error = dm_relr_relocate(m->base, m->size, at, bytes,
-+                                (m->text_end + 0x3fff) & ~0x3fffull, m->patch_off,
++                                (m->text_end + 0x3fff) & ~0x3fffull, m->key_page_off,
 +                                (uint64_t)(uintptr_t)m->base, &count, &bad);
 +    if (error) die("【红】%s: RELR 校验/应用失败 error=%d offset=%#llx", m->name, error, bad);
 +    return count;

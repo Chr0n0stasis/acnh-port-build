@@ -84,6 +84,11 @@ phase_host() {
 }
 
 phase_shaders() {
+  if [[ -n "${DM_REUSE_SHADER_RUN:-}" ]] && python3 ci/reuse_shaders.py "$DM_REUSE_SHADER_RUN" "$CHAIN"; then
+    python3 ci/check_shaders.py "output/msl-mac/b-$CHAIN" "output/msl-ios/b-$CHAIN" --bringup
+    python3 source/dm/gfx/tools/c1_guard.py "output/msl-mac/b-$CHAIN" source/dm/games/acnh/c1_full.tsv
+    return
+  fi
   export IOSOUT="$ROOT/output/msl-ios"
   python3 source/dm/gfx/tools/dmsh_build.py "$ROOT/work/shader-pkg" "$ROOT/output/msl-mac" > output/shaders.log 2>&1
   python3 ci/check_shaders.py "output/msl-mac/b-$CHAIN" "output/msl-ios/b-$CHAIN" --bringup

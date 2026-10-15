@@ -23,4 +23,4 @@ cp -R "$ROOT/work/dd/Build/Products/Release-iphoneos/DmIOS.app" "$ROOT/output/Pa
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$ROOT/output/Payload/DmIOS.app/Info.plist")" = "$DM_BUNDLE_ID"
 cd "$ROOT/output"
 zip -qry ACNHMobile-bringup-unsigned.ipa Payload
-printf 'Experimental bring-up IPA, not a complete or verified playable port. Eight geometry shaders remain unsupported; see BRINGUP-LIMITATIONS.json. Complete RomFS must be placed in Documents/romfs. No device run has been verified.\n' > IPA-STATUS.txt
+printf 'Experimental bring-up IPA, not a complete or verified playable port. Geometry lowering programs are compiled, but renderer integration remains incomplete; see BRINGUP-LIMITATIONS.json. Complete RomFS belongs in Documents/romfs. Returned device logs establish only the startup stages they reach; gameplay still needs device verification.\n' > IPA-STATUS.txt

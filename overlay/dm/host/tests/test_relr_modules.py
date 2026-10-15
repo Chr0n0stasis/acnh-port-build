@@ -39,7 +39,7 @@ def fixtures(exefs, patched, verify, output):
         with path.open('wb') as stream:
             stream.write(b'DRELR01\0')
             stream.write(struct.pack('<6Q', size, (layout['TEXT_END'] + 0x3fff) & ~0x3fff,
-                                     layout['PATCH_OFF'], tags[36], len(table), len(offsets)))
+                                     layout['KEY_PAGE_OFF'], tags[36], len(table), len(offsets)))
             stream.write(table)
             for offset in offsets:
                 stream.write(struct.pack('<QQ', offset, struct.unpack_from('<Q', image, offset)[0]))

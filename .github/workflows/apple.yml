@@ -7,6 +7,11 @@ on:
         type: string
         required: true
         default: inputs-v2228224
+      reuse_shader_run:
+        description: Successful build whose same-chain shader cache may be reused
+        type: string
+        required: false
+        default: ''
 permissions:
   contents: read
 concurrency:
@@ -22,6 +27,7 @@ jobs:
       GAME: acnh
       PYTHONUNBUFFERED: '1'
       J: '3'
+      DM_REUSE_SHADER_RUN: ${{ inputs.reuse_shader_run }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
@@ -95,6 +101,7 @@ jobs:
           path: |
             output/*.log
             output/chain.txt
+            output/shader-reuse.json
             source/dm/games/acnh/
             source/dm/gfx/tools/dmsh_chain.lock
           if-no-files-found: warn
