@@ -509,16 +509,78 @@ index 615d884..668b117 100644
  void *module_sym(module_t *m, const char *name);
  void *guest_sym(const char *name);
 diff --git a/dm/host/hle_account.c b/dm/host/hle_account.c
-index 6f3472b..d9a88de 100644
+index 6f3472b..b7cfdc7 100644
 --- a/dm/host/hle_account.c
 +++ b/dm/host/hle_account.c
-@@ -78,6 +78,11 @@ HLE_FORCE("_ZN2nn7account12GetUserCountEPi", "用户数；恒为本地用户 1 
+@@ -12,7 +12,56 @@ _Static_assert(sizeof(Uid) == 16, "Uid");
+ static const Uid k_uid = {{0x78626c0000000001ull, 0x53574e4154495645ull}};   // 非零即有效 | Non-zero means valid
+ #define HANDLE_MAGIC 0x55534552484e444cull                                    // "USERHNDL"
+ 
+-HLE_FORCE("_ZN2nn7account10InitializeEv", "连 acc:u0 账号服务；宿主固定本地用户", void, h_acc_Init, void) {}
++
++// 动森（ACNH v2228224）离线全岛云备份（olsc）本地安全桩：
++// 动森在获取用户列表后会调用内部 olsc 库检查各用户是否开启了全岛云备份（IsBackupEnabled）。
++// 原版通过 0x5b8260 获取 olsc:u 服务代理。在未初始化时，该函数会通过 SM 连接 Switch 系统 IPC 服务，
++// 在单机宿主环境下因无 SM 守护进程而触发 nn::diag::Abort。
++// 0x5b8260 在标志位非零时直接返回已注册的服务对象指针；此处预置一个虚表全返回 RES_OK、且
++// IsBackupEnabled 恒返回 false 的本地服务对象，使游戏直接认定“云备份未开启”，顺利进入主界面。
++
++static Result olsc_dummy_method(void *this, void *a1, void *a2, void *a3) {
++    (void)this; (void)a1; (void)a2; (void)a3;
++    return RES_OK;
++}
++
++static Result olsc_dummy_is_backup_enabled(void *this, uint8_t *out_flag, const void *uid) {
++    (void)this; (void)uid;
++    if (out_flag) *out_flag = 0;
++    return RES_OK;
++}
++
++static void *s_olsc_vtable[32];
++static struct {
++    void *vptr;
++} s_olsc_service;
++
++void acnh_install_olsc_stub(void) {
++    static int s_done = 0;
++    if (s_done) return;
++    s_done = 1;
++
++    for (int i = 0; i < 32; i++) {
++        s_olsc_vtable[i] = (void *)olsc_dummy_method;
++    }
++    // 槽位 6（+0x30）对应 IsBackupEnabled(this, out_flag, uid)
++    s_olsc_vtable[6] = (void *)olsc_dummy_is_backup_enabled;
++    s_olsc_service.vptr = s_olsc_vtable;
++
++    const char *bid = dm_main_build();
++    if (!strcmp(bid, "ff1d1c05670db6021c85b624a710b963")) {
++        uint8_t *main_base = g_mod[0].base;
++        if (main_base) {
++            *(uint32_t *)(main_base + 0x4b3fbf4) = 1;
++            *(uint64_t *)(main_base + 0x4b81c30) = (uint64_t)&s_olsc_service;
++            LOG("[dm] ACNH olsc: 本地离线云备份桩已安装 (state=1, srv=%p)", &s_olsc_service);
++        }
++    }
++}
++
++HLE_FORCE("_ZN2nn7account10InitializeEv", "连 acc:u0 账号服务；宿主固定本地用户", void, h_acc_Init, void) {
++    acnh_install_olsc_stub();
++}
+ 
+ HLE_FORCE("_ZN2nn7account13ListOpenUsersEPiPNS0_3UidEi", "已打开用户列表；恒为本地用户 1 个", Result, h_acc_ListOpen, int *n, Uid *out, int max) {
+     *n = 0;
+@@ -76,8 +125,15 @@ HLE_FORCE("_ZN2nn7account42NintendoAccountAuthorizationRequestContext10GetIdToke
+ // ---------- Account interfaces used by newer SDKs: user enumeration / existence / profile image, the remaining AsyncContext members ----------
+ HLE_FORCE("_ZN2nn7account12GetUserCountEPi", "用户数；恒为本地用户 1 个", Result, h_acc_UserCount, int *n) { *n = 1; return RES_OK; }
  HLE_FORCE("_ZN2nn7account18ListQualifiedUsersEPiPNS0_3UidEi", "可用用户列表；恒为本地用户 1 个", Result, h_acc_ListQual, int *n, Uid *out, int max) {
++    acnh_install_olsc_stub();
      int k = 0; if (max > 0 && out) { out[0] = k_uid; k = 1; } *n = k; return RES_OK;
  }
 +// 全部用户与可用用户共用本地身份，不再进入未建立的 Switch 账号服务。
 +// Enumerate the same local identity as qualified users without entering the absent Switch account service.
 +HLE_FORCE("_ZN2nn7account12ListAllUsersEPiPNS0_3UidEi", "全部用户列表；与现有宿主本地身份一致", Result, h_acc_ListAll, int *n, Uid *out, int max) {
++    acnh_install_olsc_stub();
 +    return h_acc_ListQual(n, out, max);
 +}
  HLE_FORCE("_ZN2nn7account16GetUserExistenceEPbRKNS0_3UidE", "用户是否存在；本地用户为真", Result, h_acc_Exists, uint8_t *out, const Uid *uid) {
@@ -882,7 +944,7 @@ index 3917a91..be3afde 100644
  // 商店属排除范围：空操作。游戏不看返回值（两个重载都按无返回值处理）
  // ---------- ec: shop applet (the upgrade-to-Switch-2-Edition page) ----------
 diff --git a/dm/host/hle_sdkinit.c b/dm/host/hle_sdkinit.c
-index 26afed1..d37bc96 100644
+index 26afed1..6013d68 100644
 --- a/dm/host/hle_sdkinit.c
 +++ b/dm/host/hle_sdkinit.c
 @@ -10,6 +10,14 @@
@@ -900,6 +962,25 @@ index 26afed1..d37bc96 100644
  HLE_FORCE("nndiagStartup", "连 lm 日志服务；诊断日志改由宿主直接输出", void, h_nndiagStartup, void) { once("nndiagStartup"); }
  HLE_FORCE("_ZN2nn2oe10InitializeEv", "连 am/oe 运行环境服务；运行环境查询逐个接成宿主默认值", void, h_oe_Initialize, void) { once("oe::Initialize"); }
  HLE_FORCE("_ZN2nn3aoc10InitializeEv", "追加内容(DLC)服务：不建会话（无服务进程）；已拥有清单由 hle_misc.c 的 aoc 接口给出（术士君临，非空）", void, h_aoc_Initialize, void) { once("aoc::Initialize"); }
+@@ -17,3 +25,18 @@ HLE_FORCE("_ZN2nn3err26InitializeContextWriterApiEv", "连 err 错误上下文
+ HLE_FORCE("_ZN2nn2fs24InitializeForApplicationEv", "连 fsp-srv 文件服务；文件接口接宿主文件系统 + RomFS", void, h_fs_InitApp, void) { once("fs::InitializeForApplication"); }
+ HLE_FORCE("_ZN2nn4pctl10InitializeEv", "连 pctl 家长控制服务；单机无家长控制", void, h_pctl_Initialize, void) { once("pctl::Initialize"); }
+ HLE_FORCE("_ZN2nn4diag34InitializeApplicationAbortObserverEv", "注册到系统的中止观察；宿主崩溃由信号处理打印", void, h_diag_AbortObs, void) { once("diag::InitializeApplicationAbortObserver"); }
++
++HLE_FORCE("_ZN2nn2sm10InitializeEv", "连接 SM 服务管理器；宿主无系统服务守护进程，直接返回成功", Result, h_sm_Initialize, void) {
++    once("sm::Initialize");
++    return RES_OK;
++}
++HLE_FORCE("_ZN2nn2sm8FinalizeEv", "SM 服务管理器收尾", void, h_sm_Finalize, void) {
++    once("sm::Finalize");
++}
++HLE_FORCE("_ZN2nn2sf4hipc31InitializeHipcServiceResolutionEv", "HIPC 服务会话解析初始化", Result, h_hipc_Init, void) {
++    once("hipc::InitializeHipcServiceResolution");
++    return RES_OK;
++}
++HLE_FORCE("_ZN2nn2sf4hipc29FinalizeHipcServiceResolutionEv", "HIPC 服务会话解析收尾", void, h_hipc_Final, void) {
++    once("hipc::FinalizeHipcServiceResolution");
++}
 diff --git a/dm/host/hle_svc.c b/dm/host/hle_svc.c
 index 7547755..bcf059a 100644
 --- a/dm/host/hle_svc.c
@@ -1054,10 +1135,20 @@ index bb94f7a..26ae1ab 100644
              for (uint64_t i = 0; i < sizes[t] / sizeof(Elf64_Rela); i++) {
                  const Elf64_Rela *r = &tabs[t][i]; uint64_t tail = (uint64_t)r->r_addend;
 diff --git a/dm/host/main.c b/dm/host/main.c
-index 9c44103..9626526 100644
+index 9c44103..5006442 100644
 --- a/dm/host/main.c
 +++ b/dm/host/main.c
-@@ -130,6 +130,10 @@ void dm_host_preload_start(int argc, char **argv) {
+@@ -36,7 +36,8 @@ static void guest_main(void) {
+     ((fnp)req("_ZN2nn2os11SetHostArgcEi"))((void *)(uint64_t)g_argc);
+     ((fnp)req("_ZN2nn2os11SetHostArgvEPPc"))(g_argv);
+     { void dm_guest_spawn_selftest(void); dm_guest_spawn_selftest(); }   // DM_GUEST_SPAWN_TEST 宿主客体线程自检（hle_guestthread.c） | DM_GUEST_SPAWN_TEST self-test of host-created guest threads (hle_guestthread.c)
+-    { void dm_padmode_boot(void); dm_padmode_boot(); }   // 触屏覆盖层在：布局前缀改指触屏版（dm_padmode.c），要在游戏建面板之前 | Touch overlay present: repoint the layout prefixes to the touch version (dm_padmode.c); must happen before the game builds its panels
++    { void dm_padmode_boot(void); dm_padmode_boot(); }
++    { void acnh_install_olsc_stub(void); acnh_install_olsc_stub(); }   // 触屏覆盖层在：布局前缀改指触屏版（dm_padmode.c），要在游戏建面板之前 | Touch overlay present: repoint the layout prefixes to the touch version (dm_padmode.c); must happen before the game builds its panels
+     LOG(">>> nnMain"); ((fn0)req("nnMain"))();
+     LOG("nnMain returned");
+ }
+@@ -130,6 +131,10 @@ void dm_host_preload_start(int argc, char **argv) {
      if (pthread_create(&g_pre.th, &a, preload_thread, NULL)) die("dm_host_preload_start：起线程失败");
  }
  int main(int argc, char **argv) {

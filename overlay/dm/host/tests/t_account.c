@@ -26,6 +26,11 @@ int main(void) {
     CHECK(h_acc_OpenUser(&handle,&all.ids[0])==0);
     CHECK(h_acc_GetUserId(&back,&handle)==0 && !memcmp(&back,&all.ids[0],sizeof(Uid)));
     h_acc_CloseUser(&handle);
-    printf("ACCOUNT_LOCAL checks=%d failures=0; enumeration and user handles share one identity\n",checks);
+        acnh_install_olsc_stub();
+    CHECK(s_olsc_vtable[6] != NULL);
+    uint8_t out_flag = 1;
+    Result r = ((Result (*)(void *, uint8_t *, const void *))s_olsc_vtable[6])(&s_olsc_service, &out_flag, &all.ids[0]);
+    CHECK(r == 0 && out_flag == 0);
+    printf("ACCOUNT_LOCAL checks=%d failures=0; enumeration, user handles and olsc stub verified\n",checks);
     return 0;
 }
