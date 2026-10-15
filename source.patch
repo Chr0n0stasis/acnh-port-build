@@ -723,10 +723,30 @@ index d90aef6..4590b9b 100644
      HP(path); struct stat st;
      if (stat(hp, &st)) return err_res("stat", hp);
 diff --git a/dm/host/hle_oe.c b/dm/host/hle_oe.c
-index 53ff6a3..fadd439 100644
+index 53ff6a3..085dc80 100644
 --- a/dm/host/hle_oe.c
 +++ b/dm/host/hle_oe.c
-@@ -284,6 +284,15 @@ HLE_FORCE("_ZN2nn2oe18GetDesiredLanguageEv", "系统语言查询；按 DM_LANG 
+@@ -75,6 +75,19 @@ void dm_focus_set(int st) {
+ }
+ static int opmode(void) { return dm_opmode(); }
+ 
++// iOS 前端已有防自动锁屏策略；SDK 查询仍需返回之前设置的延长标志。
++// The iOS front end already controls auto-lock; SDK queries still need the last requested extension flag.
++static _Atomic int g_inactivity_extended;
++HLE_FORCE("_ZN2nn2oe38SetUserInactivityDetectionTimeExtendedEb", "Track the requested inactivity extension without Switch applet IPC", void, h_oe_SetInactivity, unsigned on) {
++    atomic_store(&g_inactivity_extended, !!(on & 0xff));
++}
++HLE_FORCE("_ZN2nn2oe37IsUserInactivityDetectionTimeExtendedEv", "Read the host inactivity extension flag instead of a null Switch service", unsigned, h_oe_GetInactivity, void) {
++    return (unsigned)atomic_load(&g_inactivity_extended);
++}
++// Switch 的系统启动标志层不存在于 iOS；游戏自身的开场资源继续照常绘制。
++// The Switch system startup-logo overlay does not exist on iOS; the game's own opening content still renders normally.
++HLE_FORCE("_ZN2nn2oe17FinishStartupLogoEv", "No Switch system startup-logo overlay exists on the host", void, h_oe_FinishStartupLogo, void) {}
++
+ // 截图 / 录像开关：宿主无系统截图服务，空操作
+ // Screenshot / video recording switches: the host has no system screenshot service, no-op
+ HLE_FORCE("_ZN2nn2oe15EnableRecordingEv", "录像开关；宿主无系统录像", void, h_oe_EnableRec, void) {}
+@@ -284,6 +297,15 @@ HLE_FORCE("_ZN2nn2oe18GetDesiredLanguageEv", "系统语言查询；按 DM_LANG 
      return v;
  }
  
@@ -743,10 +763,20 @@ index 53ff6a3..fadd439 100644
  // nn::util::Uuid 16 bytes: a fixed local value (only used to tell devices apart locally, networking is cut)
  HLE_FORCE("_ZN2nn2oe17GetPseudoDeviceIdEPNS_4util4UuidE", "伪设备号；宿主固定值", void, h_oe_GetDevId, uint8_t *uuid) {
 diff --git a/dm/host/hle_sdk16.c b/dm/host/hle_sdk16.c
-index 3917a91..1c4093f 100644
+index 3917a91..be3afde 100644
 --- a/dm/host/hle_sdk16.c
 +++ b/dm/host/hle_sdk16.c
-@@ -39,11 +39,8 @@ HLE_FORCE("_ZN2nn4time19ToCalendarTimeInUtcERKNS0_9PosixTimeE", "绝对秒 → U
+@@ -29,7 +29,8 @@ HLE_FORCE("_ZN2nn2oe24SetExpectedVolumeBalanceEff", "音量平衡；宿主忽略
+ HLE_FORCE("_ZN2nn2oe25GetProgramTotalActiveTimeEv", "累计运行时长 → 宿主启动以来", int64_t, h_oe_ActiveTime, void) { return (int64_t)(now_ns() - g_t0_ns); }
+ HLE_FORCE("_ZN2nn2oe31EnterExitRequestHandlingSectionEv", "退出请求临界区；宿主的退出走 SIGTERM / 生命周期", void, h_oe_EnterExit, void) {}
+ HLE_FORCE("_ZN2nn2oe31LeaveExitRequestHandlingSectionEv", "退出请求临界区；宿主忽略", void, h_oe_LeaveExit, void) {}
+-HLE_FORCE("_ZN2nn2oe38SetUserInactivityDetectionTimeExtendedEb", "自动休眠延长；宿主忽略", void, h_oe_Inactivity, unsigned on) { (void)on; }
++// 自动休眠延长状态的读写统一放在 hle_oe.c。
++// Keep inactivity-extension reads and writes together in hle_oe.c.
+ 
+ // ---------- time ----------
+ // CalendarTime = { int16 年; int8 月, 日, 时, 分, 秒 }，按值返回（8 字节内，走 x0）
+@@ -39,11 +40,8 @@ HLE_FORCE("_ZN2nn4time19ToCalendarTimeInUtcERKNS0_9PosixTimeE", "绝对秒 → U
      return (uint64_t)(uint16_t)(tm.tm_year + 1900) | (uint64_t)(uint8_t)(tm.tm_mon + 1) << 16 | (uint64_t)(uint8_t)tm.tm_mday << 24 |
             (uint64_t)(uint8_t)tm.tm_hour << 32 | (uint64_t)(uint8_t)tm.tm_min << 40 | (uint64_t)(uint8_t)tm.tm_sec << 48;
  }
@@ -760,7 +790,7 @@ index 3917a91..1c4093f 100644
  HLE_FORCE("_ZN2nn4time26StandardNetworkSystemClock14GetCurrentTimeEPNS0_9PosixTimeE", "网络时钟（离线，不可用）", Result, h_time_NetNow, int64_t *out) { (void)out; return RES_FAIL; }
  HLE_FORCE("_ZN2nn4time8FinalizeEv", "与 Initialize 配对；宿主无会话", Result, h_time_Finalize, void) { return RES_OK; }
  // 「确保网络时钟可用」异步任务：不发请求，完成事件立即触发、结果失败。对象本身不动（构造 / 析构空操作），事件放宿主静态区
-@@ -56,66 +53,6 @@ HLE_FORCE("_ZN2nn4time39AsyncEnsureNetworkClockAvailabilityTask9StartTaskEv", "
+@@ -56,66 +54,6 @@ HLE_FORCE("_ZN2nn4time39AsyncEnsureNetworkClockAvailabilityTask9StartTaskEv", "
  HLE_FORCE("_ZN2nn4time39AsyncEnsureNetworkClockAvailabilityTask14GetFinishEventEv", "网络时钟任务完成事件：已触发", void *, h_time_NcEvent, void *self) { (void)self; hle_signal_system_event(g_ev_netclock); return g_ev_netclock; }
  HLE_FORCE("_ZN2nn4time39AsyncEnsureNetworkClockAvailabilityTask9GetResultEv", "网络时钟任务结果：离线，失败", Result, h_time_NcResult, void *self) { (void)self; return RES_FAIL; }
  
@@ -862,7 +892,7 @@ index 7547755..bcf059a 100644
          case I_DebuggerAttached: v = 0; break;
          case I_RandomEntropy: { uint64_t dm_entropy64(void); v = dm_entropy64(); break; }   // DM_DETCLOCK 开时为确定流（hle_os.c） | a deterministic stream when DM_DETCLOCK is on (hle_os.c)
 diff --git a/dm/host/hle_time.c b/dm/host/hle_time.c
-index 60160cc..b5883d8 100644
+index 60160cc..b990ca7 100644
 --- a/dm/host/hle_time.c
 +++ b/dm/host/hle_time.c
 @@ -7,9 +7,7 @@
@@ -883,7 +913,7 @@ index 60160cc..b5883d8 100644
 +// 宿主墙钟已经由操作系统校准；不建立 SDK 的共享内存时钟副本。
 +// The host OS owns wall-clock adjustment; do not construct a separate SDK shared-memory clock.
 +HLE_FORCE("_ZN2nn4time25AdjustableUserSystemClock6AdjustEv", "可调用户时钟：由宿主系统维护，不读取 Switch 时间共享内存", void, h_time_Adjust, void) {
-+    static _Atomic int once; if (!atomic_exchange(&once, 1)) LOG("time：可调用户时钟由宿主墙钟维护");
++    static _Atomic int once; if (!atomic_exchange(&once, 1)) LOG("time: adjustable user clock uses the host wall clock");
 +}
 +HLE_FORCE("_ZN2nn4time25AdjustableUserSystemClock14GetCurrentTimeEPNS0_9PosixTimeE", "可调用户时钟与标准用户时钟共用宿主墙钟及 DM_FIXED_TIME", Result, h_time_AdjustableCurrent, int64_t *out) {
 +    return h_time_GetCurrentTime(out);
@@ -895,7 +925,7 @@ index 60160cc..b5883d8 100644
  // 哪几处：返回点落在地带函数 0x58f1e0 起的那一簇（0x58f1e0–0x591440），或返回后 8 条指令内调地带日程 0x58f310（服务端 0x636b38 套地带、0x694b48 等 9 处）。
  // 过期：dm_bossrush 每拍续 1 秒，本局停拍（退出 / 崩溃）后不再生效，下一局建局时取到的是真实时钟。
 diff --git a/dm/host/loader.c b/dm/host/loader.c
-index bb94f7a..3fe892f 100644
+index bb94f7a..26ae1ab 100644
 --- a/dm/host/loader.c
 +++ b/dm/host/loader.c
 @@ -11,6 +11,7 @@
@@ -911,7 +941,7 @@ index bb94f7a..3fe892f 100644
      for (unsigned i = 0; i < g_nforce; i++)
          for (unsigned j = i + 1; j < g_nforce; j++)
 -            if (!strcmp(g_force[i].name, g_force[j].name)) die("强制接管清单重复：%s", g_force[i].name);
-+            if (!strcmp(g_force[i].name, g_force[j].name)) die("【红】强制接管清单重复：%s", g_force[i].name);
++            if (!strcmp(g_force[i].name, g_force[j].name)) die("【红】duplicate HLE_FORCE registration: %s", g_force[i].name);
 +}
 +// CI 直接检查链接后实际注册表，复用装载器的重复检测；无需启动游戏或图形设备。
 +// CI checks the linked registry with the loader's own duplicate detection, without starting the game or graphics device.
@@ -1075,13 +1105,20 @@ index 57de93d..393b68e 100644
      // Language switch rewriting the settings file (settings_lang_apply): expected values computed by hand from the rule -- only when it "does not match the switch" are Language / VoiceLanguage changed to 0 (English) or 8 (Simplified Chinese); other keys and other languages are untouched
      { extern int g_t_lang; char sd[1200], sf[1300], gotj[512]; snprintf(sd, sizeof sd, "%s/langt", root); mkdir(sd, 0755); snprintf(sf, sizeof sf, "%s/Settings", sd); mkdir(sf, 0755); snprintf(sf, sizeof sf, "%s/Settings/Settings.json", sd);
 diff --git a/dm/host/tests/t_oe.c b/dm/host/tests/t_oe.c
-index 111ff7a..b75e3eb 100644
+index 111ff7a..0c45bab 100644
 --- a/dm/host/tests/t_oe.c
 +++ b/dm/host/tests/t_oe.c
-@@ -132,6 +132,14 @@ static void test_scale3d(void) {
+@@ -132,6 +132,21 @@ static void test_scale3d(void) {
      CHECK(a == 0 && b == 0, "动态比例：实玩第二段的慢帧序列（帧率 59+）不论散开还是挤在一起都不换级");
  }
  int main(void) {
++    CHECK(h_oe_GetInactivity() == 0, "inactivity extension defaults to false");
++    h_oe_SetInactivity(1); CHECK(h_oe_GetInactivity() == 1, "inactivity extension can be enabled");
++    h_oe_SetInactivity(0); CHECK(h_oe_GetInactivity() == 0, "inactivity extension can be disabled");
++    h_oe_SetInactivity(0x100); CHECK(h_oe_GetInactivity() == 0, "ignore high argument bits for Switch bool");
++    h_oe_SetInactivity(0x101); CHECK(h_oe_GetInactivity() == 1, "use the low byte for Switch bool");
++    h_oe_FinishStartupLogo(); CHECK(h_oe_GetInactivity() == 1, "finishing system logo leaves inactivity state intact");
++    h_oe_SetInactivity(0);
 +    // 地区不是语言；拒绝越界和非整串枚举，防止游戏索引地区表时越界。
 +    // Region is not language; reject out-of-range and partial enum strings before games index their region tables.
 +    unsetenv("DM_REGION"); CHECK(h_oe_GetRegion() == 1, "默认地区美洲");
