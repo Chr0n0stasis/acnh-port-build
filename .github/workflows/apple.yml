@@ -59,7 +59,19 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: work/toolbin
-          key: acnh-spirv-cross-v1-${{ runner.os }}-${{ runner.arch }}-1.4.357.0
+          key: acnh-spirv-cross-v2-${{ runner.os }}-${{ runner.arch }}-1.4.357.0
+      - name: Migrate matching legacy shader cache on first use
+        if: steps.compiler-cache.outputs.cache-hit != 'true'
+        id: legacy-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            work/toolbin
+            output/msl-mac
+            output/msl-ios
+          key: acnh-apple-${{ runner.os }}-${{ runner.arch }}-${{ inputs.geometry_runtime && format('geometry-{0}-', hashFiles('geometry-runtime-source/**')) || '' }}migration
+          restore-keys: |
+            acnh-apple-${{ runner.os }}-${{ runner.arch }}-${{ inputs.geometry_runtime && format('geometry-{0}-', hashFiles('geometry-runtime-source/**')) || '' }}
       - name: Prepare Apple translation chain
         id: prepare
         run: bash ci/build.sh prepare
@@ -77,18 +89,6 @@ jobs:
             output/msl-mac/b-${{ steps.prepare.outputs.chain }}
             output/msl-ios/b-${{ steps.prepare.outputs.chain }}
           key: acnh-shaders-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('input-sha256.txt') }}-${{ steps.prepare.outputs.chain }}-${{ hashFiles('source/dm/games/acnh/bf_want.tsv') }}
-      - name: Migrate matching legacy shader cache on first use
-        if: steps.shader-cache.outputs.cache-hit != 'true'
-        id: legacy-cache
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            work/toolbin
-            output/msl-mac
-            output/msl-ios
-          key: acnh-apple-${{ runner.os }}-${{ runner.arch }}-${{ inputs.geometry_runtime && format('geometry-{0}-', hashFiles('geometry-runtime-source/**')) || '' }}migration
-          restore-keys: |
-            acnh-apple-${{ runner.os }}-${{ runner.arch }}-${{ inputs.geometry_runtime && format('geometry-{0}-', hashFiles('geometry-runtime-source/**')) || '' }}
       - name: Verify ARM64 rewrite structure
         if: ${{ inputs.verify_rewrite }}
         run: bash ci/build.sh verify
