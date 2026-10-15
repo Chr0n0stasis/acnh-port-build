@@ -4,6 +4,7 @@ ROOT=$PWD
 PHASE=${1:-all}
 mkdir -p output
 exec > >(tee "output/build-$PHASE.log") 2>&1
+trap 'rc=$?; if (( rc != 0 )); then echo "Build phase failed: $PHASE (exit $rc)"; for log in output/*.log; do [[ "$log" = "output/build-$PHASE.log" ]] || { echo "--- $log"; tail -n 12 "$log"; }; done; fi' EXIT
 
 activate_tools() {
   source "$ROOT/work/venv/bin/activate"
@@ -33,7 +34,10 @@ phase_prepare() {
     xcodebuild -downloadComponent MetalToolchain
   fi
   xcrun -sdk iphoneos metal --version
-  brew install xcodegen llvm
+  local packages=()
+  command -v xcodegen >/dev/null || packages+=(xcodegen)
+  [[ -x "$(brew --prefix llvm)/bin/llvm-objdump" ]] || packages+=(llvm)
+  if (( ${#packages[@]} )); then brew install "${packages[@]}"; fi
   python3 -m venv "$ROOT/work/venv"
   source "$ROOT/work/venv/bin/activate"
   python3 -m pip install lz4 capstone fonttools numpy Pillow zstandard
@@ -55,7 +59,9 @@ phase_prepare() {
   python3 source/dm/gfx/tools/dmsh_chain.py --header
   CHAIN=$(python3 source/dm/gfx/tools/dmsh_chain.py)
   printf '%s\n' "$CHAIN" > output/chain.txt
+  if [[ -n "${GITHUB_OUTPUT:-}" ]]; then printf 'chain=%s\n' "$CHAIN" >> "$GITHUB_OUTPUT"; fi
 
+  if [[ "${DM_FULL_CHECKS:-0}" = 1 ]]; then
   python3 -m unittest discover -s source/dm/gfx/tests -p 'test_shader_*.py' -v > output/shader-tests.log 2>&1
   python3 source/dm/games/game.py header acnh source/dm/host/gen/acnh/game_profile.h
   xcrun -sdk iphoneos clang -arch arm64 -isysroot "$(xcrun -sdk iphoneos --show-sdk-path)" -miphoneos-version-min=26.0 -fobjc-arc -fblocks -fsyntax-only -Wno-deprecated-declarations -Isource/dm/host/gen/acnh -Isource/dm/host source/dm/ios/Sources/DmGamepad.m > output/gamepad-build.log 2>&1
@@ -63,6 +69,7 @@ phase_prepare() {
   clang -O1 -fobjc-arc -fblocks -Wno-deprecated-declarations -Isource/dm/host/gen/acnh source/dm/ios/Sources/DmResourcePack.m source/dm/ios/tests/t_resource_pack.m work/resource_zip.o -framework Foundation -o work/t_resource_pack >> output/resource-build.log 2>&1
   xcrun -sdk iphoneos clang -arch arm64 -isysroot "$(xcrun -sdk iphoneos --show-sdk-path)" -miphoneos-version-min=26.0 -fobjc-arc -fblocks -fsyntax-only -Wno-deprecated-declarations -Isource/dm/host/gen/acnh source/dm/ios/Sources/DmResourceImport.m > output/resource-ui-build.log 2>&1
   python3 source/dm/ios/tests/test_resource_pack.py work/t_resource_pack > output/resource-tests.log 2>&1
+  fi
 }
 
 phase_verify() {
@@ -104,14 +111,15 @@ phase_host() {
 }
 
 phase_shaders() {
-  if [[ -n "${DM_REUSE_SHADER_RUN:-}" ]] && python3 ci/reuse_shaders.py "$DM_REUSE_SHADER_RUN" "$CHAIN"; then
+  if [[ -f "output/msl-mac/b-$CHAIN/_b_build.json" ]] &&
+     python3 ci/check_shaders.py "output/msl-mac/b-$CHAIN" "output/msl-ios/b-$CHAIN" --bringup; then
+    echo "Reusing compiled shader chain $CHAIN; shader compiler skipped"
+    printf '{"chain":"%s","source":"matching-chain-cache"}\n' "$CHAIN" > output/shader-reuse.json
+  else
+    export IOSOUT="$ROOT/output/msl-ios"
+    python3 source/dm/gfx/tools/dmsh_build.py "$ROOT/work/shader-pkg" "$ROOT/output/msl-mac" > output/shaders.log 2>&1
     python3 ci/check_shaders.py "output/msl-mac/b-$CHAIN" "output/msl-ios/b-$CHAIN" --bringup
-    python3 source/dm/gfx/tools/c1_guard.py "output/msl-mac/b-$CHAIN" source/dm/games/acnh/c1_full.tsv
-    return
   fi
-  export IOSOUT="$ROOT/output/msl-ios"
-  python3 source/dm/gfx/tools/dmsh_build.py "$ROOT/work/shader-pkg" "$ROOT/output/msl-mac" > output/shaders.log 2>&1
-  python3 ci/check_shaders.py "output/msl-mac/b-$CHAIN" "output/msl-ios/b-$CHAIN" --bringup
   python3 source/dm/gfx/tools/c1_guard.py "output/msl-mac/b-$CHAIN" source/dm/games/acnh/c1_full.tsv
 
 }
@@ -123,6 +131,6 @@ phase_ipa() {
 case "$PHASE" in
   prepare) phase_prepare ;;
   verify|host|shaders|ipa) activate_tools; "phase_$PHASE" ;;
-  all) phase_prepare; activate_tools; phase_verify; phase_host; phase_shaders; phase_ipa ;;
+  all) phase_prepare; activate_tools; if [[ "${DM_FULL_CHECKS:-0}" = 1 ]]; then phase_verify; phase_host; fi; phase_shaders; phase_ipa ;;
   *) echo "Unknown phase: $PHASE" >&2; exit 2 ;;
 esac

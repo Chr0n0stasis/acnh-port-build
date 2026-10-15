@@ -15,13 +15,21 @@ failed = [r for r in checked if r['st'] != 'ok']
 if not rows or failed:
     raise SystemExit(f'Shader build incomplete: {len(failed)} failures / {len(rows)} shaders')
 problems = []
+def is_metallib(path):
+    if not path.is_file():
+        return False
+    with path.open('rb') as stream:
+        return stream.read(4) == b'MTLB'
+
 for row in checked:
     key = row['key'] + '_b'
     for root in (mac, ios):
         lib = root / (key + '.metallib')
-        if not lib.exists() or lib.read_bytes()[:4] != b'MTLB':
+        if not is_metallib(lib):
             problems.append(f'{root.name}/{key}: missing compiled Metal library')
     meta = json.loads((mac / (key + '.json')).read_text())
+    if meta.get('chain') != mac.name.removeprefix('b-'):
+        problems.append(f'{key}: shader chain mismatch')
     if meta.get('msl_entry_kind') not in {'vertex', 'fragment', 'kernel'}:
         problems.append(f'{key}: no supported Metal entry point for stage {meta["stage"]}')
     if meta.get('drv_unfillable'):
@@ -47,7 +55,7 @@ if manifest_path.exists():
         assert len(metadata['programs']) == 3
         for program in metadata['programs'].values():
             for directory in (mac, ios):
-                assert (directory / program['library']).read_bytes()[:4] == b'MTLB'
+                assert is_metallib(directory / program['library'])
             geometry_programs += 1
 if deferred:
     Path('output/BRINGUP-LIMITATIONS.json').write_text(json.dumps({

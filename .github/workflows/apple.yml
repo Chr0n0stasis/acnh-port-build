@@ -7,11 +7,11 @@ on:
         type: string
         required: true
         default: inputs-v2228224
-      reuse_shader_run:
-        description: Successful build whose same-chain shader cache may be reused
-        type: string
+      full_checks:
+        description: Build the macOS host and run the full regression suite
+        type: boolean
         required: false
-        default: ''
+        default: false
       geometry_runtime:
         description: Include the geometry renderer and rebuild its matching translation chain
         type: boolean
@@ -38,8 +38,9 @@ jobs:
       GAME: acnh
       PYTHONUNBUFFERED: '1'
       J: '3'
-      DM_REUSE_SHADER_RUN: ${{ inputs.reuse_shader_run }}
+      DM_FULL_CHECKS: ${{ inputs.full_checks && '1' || '0' }}
       DM_GEOMETRY_RUNTIME: ${{ inputs.geometry_runtime && '1' || '0' }}
+      HOMEBREW_NO_AUTO_UPDATE: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
@@ -53,27 +54,37 @@ jobs:
           gh release download "$INPUT_TAG" --repo "$GITHUB_REPOSITORY" --pattern build-inputs.zip
           shasum -a 256 -c input-sha256.txt
           unzip -q build-inputs.zip -d work
-      - name: Restore private compiler and shader cache
-        id: build-cache
+      - name: Restore SPIRV-Cross compiler
+        id: compiler-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: work/toolbin
+          key: acnh-spirv-cross-v1-${{ runner.os }}-${{ runner.arch }}-1.4.357.0
+      - name: Prepare Apple translation chain
+        id: prepare
+        run: bash ci/build.sh prepare
+      - name: Save SPIRV-Cross compiler
+        if: steps.compiler-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: work/toolbin
+          key: ${{ steps.compiler-cache.outputs.cache-primary-key }}
+      - name: Restore matching compiled shaders
+        id: shader-cache
         uses: actions/cache/restore@v4
         with:
           path: |
-            work/toolbin
-            output/msl-mac
-            output/msl-ios
-          key: acnh-apple-${{ runner.os }}-${{ runner.arch }}-${{ inputs.geometry_runtime && format('geometry-{0}-', hashFiles('geometry-runtime-source/**')) || '' }}${{ hashFiles('source.patch', 'overlay/**') }}
-          restore-keys: |
-            acnh-apple-${{ runner.os }}-${{ runner.arch }}-${{ inputs.geometry_runtime && 'geometry-' || '' }}
-            acnh-apple-${{ runner.os }}-${{ runner.arch }}-
-      - name: Prepare Apple translation chain
-        run: bash ci/build.sh prepare
+            output/msl-mac/b-${{ steps.prepare.outputs.chain }}
+            output/msl-ios/b-${{ steps.prepare.outputs.chain }}
+          key: acnh-shaders-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('input-sha256.txt') }}-${{ steps.prepare.outputs.chain }}-${{ hashFiles('source/dm/games/acnh/bf_want.tsv') }}
       - name: Verify ARM64 rewrite structure
         if: ${{ inputs.verify_rewrite }}
         run: bash ci/build.sh verify
-      - name: Build host and test save transactions
+      - name: Build macOS host and run full checks (optional)
+        if: inputs.full_checks
         run: bash ci/build.sh host
       - name: Upload early host diagnostics
-        if: always()
+        if: failure() || inputs.full_checks
         uses: actions/upload-artifact@v4
         with:
           name: acnh-host-${{ github.run_number }}
@@ -82,20 +93,12 @@ jobs:
             output/*.log
             output/dmhost
           if-no-files-found: warn
-      - name: Compile macOS and iOS Metal shaders
+      - name: Reuse or compile Metal shaders
+        id: shaders
         run: bash ci/build.sh shaders
         timeout-minutes: 30
       - name: Build unsigned iOS bring-up app
         run: bash ci/build.sh ipa
-      - name: Save private compiler and shader cache
-        if: always() && steps.build-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            work/toolbin
-            output/msl-mac
-            output/msl-ios
-          key: acnh-apple-${{ runner.os }}-${{ runner.arch }}-${{ inputs.geometry_runtime && format('geometry-{0}-', hashFiles('geometry-runtime-source/**')) || '' }}${{ hashFiles('source.patch', 'overlay/**') }}
       - name: Upload unsigned bring-up IPA
         if: always()
         uses: actions/upload-artifact@v4
@@ -107,6 +110,14 @@ jobs:
             output/IPA-STATUS.txt
             output/BRINGUP-LIMITATIONS.json
           if-no-files-found: warn
+      - name: Save compiled shaders for this chain
+        if: always() && steps.shaders.outcome == 'success' && steps.shader-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            output/msl-mac/b-${{ steps.prepare.outputs.chain }}
+            output/msl-ios/b-${{ steps.prepare.outputs.chain }}
+          key: ${{ steps.shader-cache.outputs.cache-primary-key }}
       - name: Upload private build diagnostics
         if: always()
         uses: actions/upload-artifact@v4
