@@ -472,6 +472,21 @@ index d90aef6..4590b9b 100644
  HLE_FORCE("_ZN2nn2fs12GetEntryTypeEPNS0_18DirectoryEntryTypeEPKc", "fsp-srv → stat(2)", Result, h_fs_GetEntryType, int32_t *out, const char *path) {
      HP(path); struct stat st;
      if (stat(hp, &st)) return err_res("stat", hp);
+diff --git a/dm/host/hle_svc.c b/dm/host/hle_svc.c
+index 7547755..bcf059a 100644
+--- a/dm/host/hle_svc.c
++++ b/dm/host/hle_svc.c
+@@ -252,7 +252,9 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
+         case I_AslrAddr:  v = (uint64_t)g_as;    break;   case I_AslrSize:  v = RESERVE;     break;
+         case I_StackAddr: v = (uint64_t)g_stack; break;   case I_StackSize: v = g_stack_cap; break;
+         case I_TotalMem: case I_TotalNonSys: v = APP_POOL; break;
+-        case I_UsedMem:  case I_UsedNonSys:  v = g_heap_cur + 0x4000000; break;
++        // 与 SetHeapSize 的映像记账一致；动森按 total-used 一次申请，固定扣 64 MiB 会报出无法兑现的堆大小。
++        // Match SetHeapSize's image accounting; ACNH requests total-used once, so a fixed 64 MiB deduction overstates the available heap.
++        case I_UsedMem:  case I_UsedNonSys:  v = g_heap_cur + image_bytes(); break;
+         case I_SysResTotal: v = 0x2000000; break; case I_SysResUsed: v = 0x400000; break;
+         case I_DebuggerAttached: v = 0; break;
+         case I_RandomEntropy: { uint64_t dm_entropy64(void); v = dm_entropy64(); break; }   // DM_DETCLOCK 开时为确定流（hle_os.c） | a deterministic stream when DM_DETCLOCK is on (hle_os.c)
 diff --git a/dm/host/tests/t_fs.c b/dm/host/tests/t_fs.c
 index 57de93d..393b68e 100644
 --- a/dm/host/tests/t_fs.c

@@ -68,6 +68,8 @@ phase_verify() {
 }
 
 phase_host() {
+  clang -O1 -Wno-unused-function -Isource/dm/host/gen/acnh -Isource/dm/games/acnh source/dm/host/tests/t_svc_heap.c -o work/t_svc_heap > output/svc-heap-build.log 2>&1
+  work/t_svc_heap > output/svc-heap-test.log 2>&1
   make -C source/dm/host GAME=acnh > output/host-build.log 2>&1
   cp source/dm/host/dmhost output/dmhost
   make -C source/dm/host/tests GAME=acnh build/t_fs > output/fs-build.log 2>&1

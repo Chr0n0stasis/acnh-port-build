@@ -20,10 +20,12 @@ device_save_size	0x6f00000
 device_save_journal	0x6f00000
 device_save_max	0x24000000
 device_save_journal_max	0x24000000
-# 通用宿主起机初值；不是 iPhone 13 实测内存预算或成功运行的声明。
-# Initial generic-host values, not a measured iPhone 13 memory budget or a runtime-support claim.
-mem_reserve	0x140000000
-mem_alias	0xB8000000
+# 真机启动申请 0xC9400000 堆：6 GiB 地址预留中给别名区 2.25 GiB、栈 256 MiB，堆剩 3.25 GiB。
+# Device boot requests a 0xC9400000 heap: reserve 6 GiB of addresses, with 2.25 GiB alias, 256 MiB stack and 3.25 GiB heap.
+# 仅调整虚拟地址分区；实际物理内存峰值及别名区需求仍待真机验证。
+# Only virtual partitions change; physical memory peaks and alias demand still need device validation.
+mem_reserve	0x180000000
+mem_alias	0x90000000
 mem_stack	0x10000000
 app_pool	0xCD500000
 # 待全库着色器统计：先用较新 NVN 布局，不复用暗黑反射表。
