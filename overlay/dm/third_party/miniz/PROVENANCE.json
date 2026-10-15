@@ -13,5 +13,12 @@
     "miniz_zip.c": "3c1f90797c02ddc9d6bfcdf7079f5ea6f6212f257ed8745f2334dd021d697669",
     "LICENSE": "0115478d567121238cf6cc1c0c361926cf07a49d9e4c9e66da97fac6a01646b3"
   },
-  "generated": "miniz_export.h for static inclusion"
+  "generated": "miniz_export.h for static inclusion",
+  "local_patches": [
+    {
+      "file": "miniz_zip.c",
+      "reason": "Do not range-check ZIP64 local offset sentinel as an actual 32-bit file position; resolved offset is validated during stat/extract",
+      "sha256": "984c9273197c487d5140ed69ad9c22b8bdc056efca5898d5832876d08def48d2"
+    }
+  ]
 }

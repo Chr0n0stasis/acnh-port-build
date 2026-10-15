@@ -34,7 +34,7 @@ with tempfile.TemporaryDirectory() as temp:
     root = Path(temp)
     counter = 0
 
-    def volume(files, part=1, parts=1, total_files=None, total_bytes=None, pack=None, override=None, extra=None, symlink=False, method=zipfile.ZIP_STORED):
+    def volume(files, part=1, parts=1, total_files=None, total_bytes=None, pack=None, override=None, extra=None, symlink=False, method=zipfile.ZIP_STORED, prefix=0):
         global counter
         counter += 1
         pack = pack or str(uuid.uuid4())
@@ -45,7 +45,9 @@ with tempfile.TemporaryDirectory() as temp:
         if override:
             override(meta)
         path = root / f'{counter}.zip'
-        with zipfile.ZipFile(path, 'w', compression=method) as z:
+        handle = path.open('w+b')
+        handle.seek(prefix)
+        with handle, zipfile.ZipFile(handle, 'w', compression=method) as z:
             for name, value in files.items():
                 info = zipfile.ZipInfo('romfs/' + name)
                 info.compress_type = method
@@ -122,5 +124,8 @@ with tempfile.TemporaryDirectory() as temp:
     many = {MARKER: b'x'} | {f'Model/{i:05d}': b'' for i in range(65535)}
     large = volume(many)
     check(call(large, root / 'zip64')['complete'], 'ZIP64 archive with over 65535 entries imports correctly')
+    for prefix in ((1 << 31) + 4096, (1 << 32) + 4096):
+        sparse = volume({MARKER: b'offset-test'}, prefix=prefix)
+        check(call(sparse, root / f'offset-{prefix}')['complete'], f'ZIP64 local offset above {prefix} handled without treating sentinel as position')
 
 print(f'{checks} checks passed', flush=True)

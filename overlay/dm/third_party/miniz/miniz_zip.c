@@ -932,7 +932,9 @@ static int mz_stat64(const char *path, struct __stat64 *buffer)
                 if ((disk_index == MZ_UINT16_MAX) || ((disk_index != num_this_disk) && (disk_index != 1)))
                     return mz_zip_set_error(pZip, MZ_ZIP_UNSUPPORTED_MULTIDISK);
 
-                if (comp_size != MZ_UINT32_MAX)
+                /* ZIP64 的偏移哨兵不是实际文件位置；实际 64 位偏移在 file_stat / extract 时校验。
+                 * A ZIP64 offset sentinel is not a file position; file_stat / extract validate the resolved 64-bit offset. */
+                if ((comp_size != MZ_UINT32_MAX) && (local_header_ofs != MZ_UINT32_MAX))
                 {
                     if (((mz_uint64)MZ_READ_LE32(p + MZ_ZIP_CDH_LOCAL_HEADER_OFS) + MZ_ZIP_LOCAL_DIR_HEADER_SIZE + comp_size) > pZip->m_archive_size)
                         return mz_zip_set_error(pZip, MZ_ZIP_INVALID_HEADER_OR_CORRUPTED);
