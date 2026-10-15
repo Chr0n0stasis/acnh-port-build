@@ -4,13 +4,17 @@ Independent ACNH ZIP volumes; originals are read-only, with manifests for the iO
 import argparse
 import hashlib
 import json
-import shutil
 import uuid
 import zipfile
 from pathlib import Path
 
 
-def package(romfs, output, part_bytes=int(3.76 * 1024**3), title='01006F8002326000', build='v2228224'):
+def package(romfs, output, part_bytes=int(3.76 * 1024**3), title=None, build=None):
+    # 身份取自同一个游戏档案，避免包装器与宿主版本漂移。
+    # Read identity from the same profile to keep the packager and host in sync.
+    profile = Path(__file__).resolve().parents[1] / 'dm/games/acnh/game.tsv'
+    values = dict(line.split('\t', 1) for line in profile.read_text(encoding='utf8').splitlines() if line and not line.startswith('#'))
+    title, build = title or values['title_id'], build or values['resource_pack_build']
     romfs, output = Path(romfs).resolve(), Path(output).resolve()
     if output == romfs or romfs in output.parents:
         raise ValueError('Output must be outside the original RomFS')

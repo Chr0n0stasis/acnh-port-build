@@ -17,6 +17,7 @@ UIViewController *front_ios_root(void);
 @property(nonatomic,strong) NSURL *serverBase;
 @property(nonatomic,strong) NSDictionary *serverManifest;
 @property(nonatomic,strong) NSSet *received;
+@property(nonatomic,strong) NSTimer *downloadTimer;
 @property(nonatomic) BOOL busy;
 @property(nonatomic) BOOL checkedIncoming;
 @end
@@ -89,7 +90,9 @@ UIViewController *front_ios_root(void);
     });
 }
 - (void)finishNetwork:(NSString *)message {
+    fprintf(stderr,"resources: %s\n",message.UTF8String);
     dispatch_async(dispatch_get_main_queue(),^{
+        [self.downloadTimer invalidate]; self.downloadTimer=nil;
         self.busy=NO; self.importButton.enabled=YES; self.downloadButton.enabled=YES;
         UIApplication.sharedApplication.idleTimerDisabled=NO; self.status.text=message;
         [self.session finishTasksAndInvalidate]; self.session=nil;
@@ -151,7 +154,11 @@ UIViewController *front_ios_root(void);
     NSURL *url=[self.serverBase URLByAppendingPathComponent:volume[@"file"]];
     // NSURLSession 下载任务把响应写入临时文件，禁止用 NSData 缓存数 GiB 分卷。
     // Download tasks stream responses to temporary files; never buffer multi-GiB volumes in NSData.
-    [[self.session downloadTaskWithURL:url completionHandler:^(NSURL *temporary,NSURLResponse *response,NSError *error){
+    NSURLSessionDownloadTask *task=[self.session downloadTaskWithURL:url completionHandler:^(NSURL *temporary,NSURLResponse *response,NSError *error){
+        dispatch_async(dispatch_get_main_queue(),^{
+            [self.downloadTimer invalidate]; self.downloadTimer=nil;
+            self.status.text=[NSString stringWithFormat:@"正在校验第 %@ / %@ 卷…",volume[@"part"],self.serverManifest[@"parts"]];
+        });
         if (error || ((NSHTTPURLResponse *)response).statusCode!=200 || !temporary) { [self finishNetwork:error.localizedDescription ?: @"分卷下载失败，已导入的卷会保留。"]; return; }
         FILE *file=fopen(temporary.fileSystemRepresentation,"rb");
         if (!file) { [self finishNetwork:@"无法读取下载缓存。"]; return; }
@@ -172,7 +179,19 @@ UIViewController *front_ios_root(void);
             dispatch_async(dispatch_get_main_queue(),^{if(front_ios_retry_boot())self.view.window.rootViewController=front_ios_root();});
         } else if (next<volumes.count) [self downloadVolume:next];
         else [self finishNetwork:@"尚缺资源分卷，请重新连接电脑继续导入。"]; 
-    }] resume];
+    }];
+    dispatch_async(dispatch_get_main_queue(),^{
+        [self.downloadTimer invalidate];
+        __weak DmResourceVC *weakSelf=self;
+        self.downloadTimer=[NSTimer scheduledTimerWithTimeInterval:0.3 repeats:YES block:^(NSTimer *timer){
+            DmResourceVC *owner=weakSelf; if (!owner) { [timer invalidate]; return; }
+            double done=(double)task.countOfBytesReceived, total=[volume[@"bytes"] doubleValue];
+            owner.progress.progress=total>0 ? (float)fmin(1.0,done/total) : 0;
+            owner.status.text=[NSString stringWithFormat:@"正在下载第 %@ / %@ 卷：%.2f / %.2f GiB\n请保持 App 在前台。",volume[@"part"],owner.serverManifest[@"parts"],done/(1ull<<30),total/(1ull<<30)];
+        }];
+    });
+    fprintf(stderr,"resources: downloading volume %s/%s\n",[volume[@"part"] description].UTF8String,[self.serverManifest[@"parts"] description].UTF8String);
+    [task resume];
 }
 - (void)exportLog {
     NSURL *log=[self.documents URLByAppendingPathComponent:@"log.txt"];
