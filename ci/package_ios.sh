@@ -11,6 +11,7 @@ LINK_FLAGS=$(python3 tools/gen_embed.py "$ROOT/work/patched" Gen/embed.S main su
 printf 'OTHER_LDFLAGS = $(inherited) $(DM_FRAMEWORKS) %s\n' "$LINK_FLAGS" >> Gen/dm.xcconfig
 cp "$ROOT"/work/patched/*.tsv Gen/dm/
 cp ../games/acnh/{shader_map.tsv,pso_manifest.tsv,c1_full.tsv} Gen/dm/
+printf 'DM_NVN_SHDUMP=shader-dump\n' > Gen/dm/env.txt
 cp -R "$ROOT/output/msl-ios/b-$CHAIN" Gen/msl/
 mkdir -p Gen/dm/font
 cp '/System/Library/Fonts/Supplemental/Arial Unicode.ttf' Gen/dm/font/standard.ttf

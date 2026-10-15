@@ -500,6 +500,22 @@ index 615d884..668b117 100644
  void run_module_inits(void);
  void *module_sym(module_t *m, const char *name);
  void *guest_sym(const char *name);
+diff --git a/dm/host/hle_account.c b/dm/host/hle_account.c
+index 6f3472b..d9a88de 100644
+--- a/dm/host/hle_account.c
++++ b/dm/host/hle_account.c
+@@ -78,6 +78,11 @@ HLE_FORCE("_ZN2nn7account12GetUserCountEPi", "用户数；恒为本地用户 1 
+ HLE_FORCE("_ZN2nn7account18ListQualifiedUsersEPiPNS0_3UidEi", "可用用户列表；恒为本地用户 1 个", Result, h_acc_ListQual, int *n, Uid *out, int max) {
+     int k = 0; if (max > 0 && out) { out[0] = k_uid; k = 1; } *n = k; return RES_OK;
+ }
++// 全部用户与可用用户共用本地身份，不再进入未建立的 Switch 账号服务。
++// Enumerate the same local identity as qualified users without entering the absent Switch account service.
++HLE_FORCE("_ZN2nn7account12ListAllUsersEPiPNS0_3UidEi", "全部用户列表；与现有宿主本地身份一致", Result, h_acc_ListAll, int *n, Uid *out, int max) {
++    return h_acc_ListQual(n, out, max);
++}
+ HLE_FORCE("_ZN2nn7account16GetUserExistenceEPbRKNS0_3UidE", "用户是否存在；本地用户为真", Result, h_acc_Exists, uint8_t *out, const Uid *uid) {
+     *out = uid->v[0] == k_uid.v[0] && uid->v[1] == k_uid.v[1]; return RES_OK;
+ }
 diff --git a/dm/host/hle_audren.c b/dm/host/hle_audren.c
 index c85df0c..b58a33a 100644
 --- a/dm/host/hle_audren.c
@@ -1152,10 +1168,23 @@ index 9555b92..f7a6dc8 100644
  void *front_metal_layer(void) { return (__bridge void *)g_layer; }
  uint64_t front_game_res(int docked) { return docked ? 900ull << 32 | 1600 : 720ull << 32 | 1280; }   // 同 Mac：原版 16:9 常数 | Same as Mac: the original 16:9 constants
 diff --git a/dm/ios/Sources/main.m b/dm/ios/Sources/main.m
-index deaf00d..98433c3 100644
+index deaf00d..167fb10 100644
 --- a/dm/ios/Sources/main.m
 +++ b/dm/ios/Sources/main.m
-@@ -63,6 +63,9 @@ static int boot_env(void) {
+@@ -58,11 +58,22 @@ static int boot_env(void) {
+     setenv("DM_MSL_DIR", [res stringByAppendingPathComponent:@"msl"].fileSystemRepresentation, 0);
+     setenv("DM_FONT_DIR", [dm stringByAppendingPathComponent:@"font"].fileSystemRepresentation, 0);   // 共享字体替身（standard.ttf / nintendo_ext.ttf）：iOS 上没有 macOS 的字体路径 | Shared-font stand-ins (standard.ttf / nintendo_ext.ttf): iOS lacks the macOS font path
+     chdir(doc.fileSystemRepresentation);
++    // 仅在明确启用着色器导出时建立目录；相对路径以文稿目录为基准。
++    // Create the shader dump directory only when enabled; relative paths are rooted in Documents.
++    const char *shader_dump = getenv("DM_NVN_SHDUMP");
++    if (shader_dump && *shader_dump) {
++        NSError *error = nil;
++        if (![fm createDirectoryAtPath:[NSString stringWithUTF8String:shader_dump] withIntermediateDirectories:YES attributes:nil error:&error])
++            fprintf(stderr, "boot: cannot create shader dump directory: %s\n", error.localizedDescription.UTF8String);
++    }
+     g_argv[0] = strdup("dmhost"); g_argv[1] = strdup(dm.fileSystemRepresentation); g_argc = 2;
+     dm_host_preload_start(g_argc, g_argv);   // 读模块表 / 重定位 / 接管提前在后台跑，与 UIKit 启动并行 | Module tables / relocation / takeover run early in the background, in parallel with UIKit startup
      return 1;
  }
  static int g_boot_ok;
@@ -1165,7 +1194,7 @@ index deaf00d..98433c3 100644
  
  static void *boot_thread(void *p) {
      (void)p;
-@@ -72,7 +75,7 @@ static void *boot_thread(void *p) {
+@@ -72,7 +83,7 @@ static void *boot_thread(void *p) {
      return NULL;
  }
  void front_ios_boot(void) {   // 窗口与 Metal 视图建好后由 front_ios.m 调 | Called by front_ios.m once the window and Metal view exist
