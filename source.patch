@@ -331,7 +331,7 @@ index bea0206..48ba7bd 100644
      # 第一遍：全部文件；Unity 资源包带类型树，顺手收下 Shader 的树。第二遍：没带类型树的 Unity 序列化文件借这些树再扫
      # First pass: every file; Unity bundles carry type trees, and the Shader trees are collected on the way. Second pass: Unity serialized files without type trees are scanned again with the borrowed trees
 diff --git a/dm/host/hle_fs.c b/dm/host/hle_fs.c
-index d90aef6..a338e0c 100644
+index d90aef6..4590b9b 100644
 --- a/dm/host/hle_fs.c
 +++ b/dm/host/hle_fs.c
 @@ -480,12 +480,38 @@ HLE_FORCE("_ZN2nn2fs13MountSaveDataEPKcRKNS_7account3UidE", "fsp-srv；存档 
@@ -417,7 +417,7 @@ index d90aef6..a338e0c 100644
  HLE_FORCE("_ZN2nn2fs7UnmountEPKc", "fsp-srv；挂载表常驻，卸载为空操作", void, h_fs_Unmount, const char *name) { (void)name; }
  
  // ---------- 文件 ----------
-@@ -720,9 +781,33 @@ static int rm_tree(const char *p) {
+@@ -720,9 +781,37 @@ static int rm_tree(const char *p) {
  HLE_FORCE("_ZN2nn2fs26DeleteDirectoryRecursivelyEPKc", "fsp-srv → 递归删除（只在可写挂载内）", Result, h_fs_DeleteDirRec, const char *path) {
      HP(path); RW(); return rm_tree(hp) ? err_res("rmtree", hp) : RES_OK;
  }
@@ -432,7 +432,11 @@ index d90aef6..a338e0c 100644
 +        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
 +        char child[1400];
 +        if (snprintf(child, sizeof child, "%s/%s", hp, entry->d_name) >= (int)sizeof child) { error = ENAMETOOLONG; break; }
-+        if (rm_tree(child)) { error = errno ? errno : EIO; break; }
++        // 清空目录也会遇到普通文件；lstat 不跟随符号链接，避免删除挂载外的目标。
++        // Contents include files too; lstat leaves symlink targets outside the mount untouched.
++        struct stat st;
++        if (lstat(child, &st)) { error = errno; break; }
++        if (S_ISDIR(st.st_mode) ? rm_tree(child) : unlink(child)) { error = errno ? errno : EIO; break; }
 +    }
 +    if (closedir(dir) && !error) error = errno;
 +    if (error) { if (in_txn_dir(hp)) save_poison(error); errno = error; return err_res("clean", hp); }
@@ -453,7 +457,7 @@ index d90aef6..a338e0c 100644
      if (!access(hp2, F_OK)) return RES_PATH_EXISTS;
      if (rename(hp, hp2)) return err_res("rename", hp);
      if (dm_fs_test_fail("guestname") || set_guest_name(hp2, to)) { int e = errno ? errno : EIO;
-@@ -731,6 +816,12 @@ HLE_FORCE("_ZN2nn2fs10RenameFileEPKcS2_", "fsp-srv → rename(2)", Result, h_fs_
+@@ -731,6 +820,12 @@ HLE_FORCE("_ZN2nn2fs10RenameFileEPKcS2_", "fsp-srv → rename(2)", Result, h_fs_
          errno = e; return err_res("rename name", hp2); }
      return RES_OK;
  }
