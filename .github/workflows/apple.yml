@@ -44,7 +44,7 @@ jobs:
         env:
           INPUT_TAG: ${{ inputs.input_tag }}
         run: |
-          test "$(gh repo view "$GITHUB_REPOSITORY" --json visibility --jq .visibility)" = PRIVATE
+          gh repo view "$GITHUB_REPOSITORY" --json nameWithOwner,visibility
           gh release download "$INPUT_TAG" --repo "$GITHUB_REPOSITORY" --pattern build-inputs.zip
           shasum -a 256 -c input-sha256.txt
           unzip -q build-inputs.zip -d work
