@@ -56,8 +56,10 @@ jobs:
             work/toolbin
             output/msl-mac
             output/msl-ios
-          key: acnh-apple-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('source.patch', 'overlay/**') }}
-          restore-keys: acnh-apple-${{ runner.os }}-${{ runner.arch }}-
+          key: acnh-apple-${{ runner.os }}-${{ runner.arch }}-${{ inputs.geometry_runtime && format('geometry-{0}-', hashFiles('geometry-runtime-source/**')) || '' }}${{ hashFiles('source.patch', 'overlay/**') }}
+          restore-keys: |
+            acnh-apple-${{ runner.os }}-${{ runner.arch }}-${{ inputs.geometry_runtime && 'geometry-' || '' }}
+            acnh-apple-${{ runner.os }}-${{ runner.arch }}-
       - name: Prepare Apple translation chain
         run: bash ci/build.sh prepare
       - name: Verify ARM64 rewrite structure
@@ -87,7 +89,7 @@ jobs:
             work/toolbin
             output/msl-mac
             output/msl-ios
-          key: acnh-apple-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('source.patch', 'overlay/**') }}
+          key: acnh-apple-${{ runner.os }}-${{ runner.arch }}-${{ inputs.geometry_runtime && format('geometry-{0}-', hashFiles('geometry-runtime-source/**')) || '' }}${{ hashFiles('source.patch', 'overlay/**') }}
       - name: Upload unsigned bring-up IPA
         if: always()
         uses: actions/upload-artifact@v4
