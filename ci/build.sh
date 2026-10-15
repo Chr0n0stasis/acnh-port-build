@@ -57,8 +57,8 @@ phase_prepare() {
   python3 source/dm/games/game.py header acnh source/dm/host/gen/acnh/game_profile.h
   clang -O1 -c source/dm/ios/Sources/DmZipCore.c -o work/resource_zip.o > output/resource-build.log 2>&1
   clang -O1 -fobjc-arc -fblocks -Wno-deprecated-declarations -Isource/dm/host/gen/acnh source/dm/ios/Sources/DmResourcePack.m source/dm/ios/tests/t_resource_pack.m work/resource_zip.o -framework Foundation -o work/t_resource_pack >> output/resource-build.log 2>&1
-  python3 source/dm/ios/tests/test_resource_pack.py work/t_resource_pack > output/resource-tests.log 2>&1
   xcrun -sdk iphoneos clang -arch arm64 -isysroot "$(xcrun -sdk iphoneos --show-sdk-path)" -miphoneos-version-min=26.0 -fobjc-arc -fblocks -fsyntax-only -Wno-deprecated-declarations -Isource/dm/host/gen/acnh source/dm/ios/Sources/DmResourceImport.m > output/resource-ui-build.log 2>&1
+  python3 source/dm/ios/tests/test_resource_pack.py work/t_resource_pack > output/resource-tests.log 2>&1
 }
 
 phase_verify() {

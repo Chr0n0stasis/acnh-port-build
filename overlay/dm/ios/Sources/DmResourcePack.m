@@ -136,11 +136,17 @@ NSDictionary *dm_resource_import(NSURL *archive, NSURL *documents, DmImportProgr
         for (NSString *path in expected) if ([claimed containsObject:path]) { fail(error, @"不同分卷包含重复资源路径。"); return nil; }
         if (![fm createDirectoryAtURL:root withIntermediateDirectories:YES attributes:nil error:error]) return nil;
         __block uint64_t done=0;
-        for (NSDictionary *row in rows) { @autoreleasepool {
+        for (NSDictionary *row in rows) {
             uint64_t base=done;
-            if (!extract_file(&zip, [indices[row[@"path"]] unsignedIntValue], row, root, ^(uint64_t n,uint64_t size){ if (progress) progress(base+n,volumeBytes); }, error)) return nil;
+            // 错误对象跨过每文件的自动释放池后仍要可读。
+            // Keep errors alive across the per-file autorelease pool.
+            NSError *itemError=nil; BOOL imported;
+            @autoreleasepool {
+                imported=extract_file(&zip, [indices[row[@"path"]] unsignedIntValue], row, root, ^(uint64_t n,uint64_t size){ if (progress) progress(base+n,volumeBytes); }, &itemError);
+            }
+            if (!imported) { if (error) *error=itemError; return nil; }
             done += [row[@"size"] unsignedLongLongValue];
-        } }
+        }
         volumes[part]=rows;
         NSData *newState=[NSJSONSerialization dataWithJSONObject:state options:0 error:error];
         if (!newState || ![newState writeToURL:stateURL options:NSDataWritingAtomic error:error]) return nil;
@@ -150,7 +156,14 @@ NSDictionary *dm_resource_import(NSURL *archive, NSURL *documents, DmImportProgr
             for (unsigned n=1; n<=[meta[@"parts"] unsignedIntValue]; ++n) {
                 NSArray *files=volumes[[@(n) stringValue]]; if (!files) { fail(error,@"分卷编号不连续。"); return nil; }
                 for (NSDictionary *row in files) {
-                    if (!check_file(root,row,error)) return nil;
+                    if (!check_file(root,row,error)) {
+                        // 让下次局域网导入重新下载损坏卷，避免一直跳过它。
+                        // Mark a damaged earlier volume incomplete so a later LAN import downloads it again.
+                        [volumes removeObjectForKey:[@(n) stringValue]];
+                        NSData *repair=[NSJSONSerialization dataWithJSONObject:state options:0 error:nil];
+                        if (repair) [repair writeToURL:stateURL options:NSDataWritingAtomic error:nil];
+                        return nil;
+                    }
                     totalFiles++; totalBytes += [row[@"size"] unsignedLongLongValue];
                 }
             }

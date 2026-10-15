@@ -26,7 +26,7 @@ def check(value, message):
 def call(volume, documents, ok=True):
     documents.mkdir(parents=True, exist_ok=True)
     run = subprocess.run([EXE, str(volume), str(documents)], text=True, capture_output=True)
-    check(run.returncode == (0 if ok else 2), f'import {volume.name}: expected {"success" if ok else "failure"}; {run.stdout.strip()} {run.stderr.strip()}')
+    check(run.returncode == (0 if ok else 2), f'import {volume.name}: expected {"success" if ok else "failure"}, exit={run.returncode}; {run.stdout.strip()} {run.stderr.strip()}')
     return json.loads(run.stdout)
 
 
