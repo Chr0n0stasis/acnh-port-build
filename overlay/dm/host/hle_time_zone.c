@@ -39,12 +39,31 @@ static Result zone_calendar_time(CalendarTime *out, CalendarAdditionalInfo *info
     if (abbreviation) { CFStringGetCString(abbreviation,extra.tzname,sizeof extra.tzname,kCFStringEncodingUTF8); CFRelease(abbreviation); }
     if (out) *out=value; if (info) *info=extra; CFRelease(c); return RES_OK;
 }
-HLE_FORCE("_ZN2nn4time21GetDeviceLocationNameEPNS0_12LocationNameE", "设备时区：读取 Apple 系统 IANA 名称，不连接 Switch 时区服务", void, h_time_DeviceZone, TimeLocationName *out) {
+void dm_time_device_zone(TimeLocationName *out) {
     CFTimeZoneResetSystem(); CFTimeZoneRef z=CFTimeZoneCopySystem(); TimeLocationName name={0};
     if (!z || !CFStringGetCString(CFTimeZoneGetName(z),name.name,sizeof name.name,kCFStringEncodingUTF8)) {
         if (z) CFRelease(z); die("【红】无法读取宿主系统时区名称");
     }
     CFRelease(z); *out=name;
+}
+HLE_FORCE("_ZN2nn4time21GetDeviceLocationNameEPNS0_12LocationNameE", "设备时区：读取 Apple 系统 IANA 名称，不连接 Switch 时区服务", void, h_time_DeviceZone, TimeLocationName *out) {
+    dm_time_device_zone(out);
+}
+// 快照的名称和日期必须使用同一个时区，内部格式单独封装。
+// Use one zone for the snapshot name and calendar, packing the internal representation explicitly.
+int dm_time_snapshot_calendar(CalendarTime *date, SnapshotCalendarAdditionalInfo *info,
+                              TimeLocationName *location, int64_t posix) {
+    dm_time_device_zone(location);
+    CFTimeZoneRef zone = zone_named(location->name);
+    CalendarAdditionalInfo extra = {0};
+    Result result = zone_calendar_time(date, &extra, &posix, zone);
+    if (zone) CFRelease(zone);
+    if (result != RES_OK) return 0;
+    memset(info, 0, sizeof *info);
+    info->wday = (int8_t)extra.wday; info->yday = extra.yday;
+    memcpy(info->tzname, extra.tzname, sizeof info->tzname);
+    info->dst = extra.dst; info->offset = extra.offset;
+    return 1;
 }
 HLE_FORCE("_ZN2nn4time16LoadTimeZoneRuleEPNS0_12TimeZoneRuleERKNS0_12LocationNameE", "时区规则：保存可复制名称，转换使用 Apple 时区数据库", Result, h_time_LoadZone, TimeZoneRule *out, const TimeLocationName *name) {
     if (!out || !name) return RES_FAIL;

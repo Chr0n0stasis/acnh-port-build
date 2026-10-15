@@ -13,10 +13,10 @@ on:
         required: false
         default: false
       geometry_runtime:
-        description: Include the geometry renderer and rebuild its matching translation chain
+        description: Include the geometry renderer (disable only for legacy diagnostics)
         type: boolean
         required: false
-        default: false
+        default: true
       verify_rewrite:
         description: Verify ARM64 rewrite structure against ExeFS (slow)
         type: boolean
