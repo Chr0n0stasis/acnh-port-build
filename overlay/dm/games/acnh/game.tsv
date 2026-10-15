@@ -13,6 +13,12 @@ modules	main subsdk0 sdk
 romfs_marker	Shader/Park_UBER_All.Nin_NX_NVN.szs
 zip_store	.zs:.szs:.bwav:.metallib
 present_interval	game
+# 来自该更新 control.nacp 的设备存档/日志初始容量及上限；宿主事务以 APFS 克隆实现，不建立 Switch 日志文件。
+# Initial/max device-save and journal capacities from this update's control.nacp; host transactions use APFS clones, not Switch journal files.
+device_save_size	0x6f00000
+device_save_journal	0x6f00000
+device_save_max	0x24000000
+device_save_journal_max	0x24000000
 # 通用宿主起机初值；不是 iPhone 13 实测内存预算或成功运行的声明。
 # Initial generic-host values, not a measured iPhone 13 memory budget or a runtime-support claim.
 mem_reserve	0x140000000

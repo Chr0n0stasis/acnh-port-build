@@ -1,5 +1,5 @@
 diff --git a/dm/games/game.py b/dm/games/game.py
-index 27d6045..1836b61 100644
+index 27d6045..7961a9a 100644
 --- a/dm/games/game.py
 +++ b/dm/games/game.py
 @@ -68,6 +68,12 @@ def header(g):
@@ -15,7 +15,17 @@ index 27d6045..1836b61 100644
      vers = ', '.join('{' + q(b['main']) + ', ' + q(b['display']) + '}' for b in g.builds().values() if 'main' in b)
      pi = g.get('present_interval', 'game')   # 出图间隔：game = 按游戏设的（同 Switch），display = 每个显示节拍一帧 | present interval: game = as the game sets it (as on the Switch), display = one frame per display tick
      if pi not in ('game', 'display'): sys.exit(f'{g.id}: present_interval 只能是 game / display | present_interval must be game or display: {pi}')
-@@ -84,6 +90,9 @@ def header(g):
+@@ -78,12 +84,19 @@ def header(g):
+          f'#define DM_GAME_PROGRAM_ID 0x{int(g.get("program_id"), 16):016X}ull',
+          f'#define DM_GAME_MODULES {{{", ".join(map(q, mods))}}}',
+          f'#define DM_GAME_NMOD {len(mods)}',
++         f'#define DM_GAME_DEVICE_SAVE_SIZE {int(g.get("device_save_size", "0"), 0):#x}ll',
++         f'#define DM_GAME_DEVICE_SAVE_JOURNAL {int(g.get("device_save_journal", "0"), 0):#x}ll',
++         f'#define DM_GAME_DEVICE_SAVE_MAX {int(g.get("device_save_max", "0"), 0):#x}ll',
++         f'#define DM_GAME_DEVICE_SAVE_JOURNAL_MAX {int(g.get("device_save_journal_max", "0"), 0):#x}ll',
+          f'#define DM_GAME_ROMFS_MARKER {q(g.get("romfs_marker"))}',
+          f'#define DM_GAME_MEM_RESERVE {g.int("mem_reserve"):#x}ull',
+          f'#define DM_GAME_MEM_ALIAS {g.int("mem_alias"):#x}ull',
           f'#define DM_GAME_MEM_STACK {g.int("mem_stack"):#x}ull',
           f'#define DM_GAME_APP_POOL {g.int("app_pool"):#x}ull',
           f'#define DM_GAME_NVN_SSBO_BASE(stage) ({sb})',
@@ -321,10 +331,10 @@ index bea0206..48ba7bd 100644
      # 第一遍：全部文件；Unity 资源包带类型树，顺手收下 Shader 的树。第二遍：没带类型树的 Unity 序列化文件借这些树再扫
      # First pass: every file; Unity bundles carry type trees, and the Shader trees are collected on the way. Second pass: Unity serialized files without type trees are scanned again with the borrowed trees
 diff --git a/dm/host/hle_fs.c b/dm/host/hle_fs.c
-index d90aef6..4e24919 100644
+index d90aef6..a664f85 100644
 --- a/dm/host/hle_fs.c
 +++ b/dm/host/hle_fs.c
-@@ -480,6 +480,11 @@ HLE_FORCE("_ZN2nn2fs13MountSaveDataEPKcRKNS_7account3UidE", "fsp-srv；存档 
+@@ -480,12 +480,38 @@ HLE_FORCE("_ZN2nn2fs13MountSaveDataEPKcRKNS_7account3UidE", "fsp-srv；存档 
      { const char *e = getenv("DM_TOUCH_DEFAULTS"); if (d2r && g_dm_mount_seed_hook && (e ? strcmp(e, "0") != 0 : TARGET_OS_IPHONE)) g_dm_mount_seed_hook(dd); }
      return mount_ex(name, dd, 0, 1);
  }
@@ -333,14 +343,85 @@ index d90aef6..4e24919 100644
 +HLE_FORCE("_ZN2nn2fs19MountDeviceSaveDataEPKc", "fsp-srv；设备存档接同一事务目录，保留 Commit/回滚语义", Result, h_fs_MountDeviceSave, const char *name) {
 +    return h_fs_MountSave(name, NULL);
 +}
++// SDK 20 GetSaveDataRestoreFlag 在 0xedf84 / 0xee0d0 取 bit 4；CommitOption 2 设置它，1 清除它。
++// SDK 20 reads bit 4 at 0xedf84 / 0xee0d0; CommitOption 2 sets it and 1 clears it.
++// 目录扩展属性随 APFS 克隆与原子换入一起提交，不在游戏目录里增加可见文件。
++// The directory xattr travels with APFS cloning and atomic publication, without adding visible game files.
++#define SAVE_RESTORE_ATTR "org.d2rmobile.save_restore"
++HLE_FORCE("_ZN2nn2fs22GetSaveDataRestoreFlagEPbPKc", "fsp-srv；读取随事务目录提交的存档恢复标记", Result, h_fs_GetRestoreFlag, uint8_t *out, const char *name) {
++    if (!out || !name) return RES_FAIL;
++    PATH_LOCK();
++    pthread_mutex_lock(&g_lock);
++    int i = 0; while (i < g_nmnt && strcmp(g_mnt[i].name, name)) i++;
++    Result result = i < g_nmnt ? RES_OK : RES_PATH_NOT_FOUND;
++    if (result == RES_OK) {
++        uint8_t value = 0;
++        const char *path = g_mnt[i].commit[0] ? g_mnt[i].commit : g_mnt[i].dir;
++        ssize_t length = getxattr(path, SAVE_RESTORE_ATTR, &value, 1, 0, 0);
++        if ((length < 0 && errno != ENOATTR) || (length >= 0 && (length != 1 || value > 1))) result = RES_FAIL;
++        else *out = value;
++    }
++    pthread_mutex_unlock(&g_lock);
++    return result;
++}
  void (*g_dm_pre_commit_hook[4])(const char *workdir);   // 提交前调（工作目录）：宿主旁路文件按工作目录里的存档内容核对后再写（[0] 个人仓库多页 dm_pages.c、[2] 百宝囊 dm_pouch.c、[1] 编年史仓库 dm_vault.c、[3] 秘境进度 dm_rift.c） | called before commit (working directory): host side files are checked against the save contents in the working directory before being written ([0] personal stash pages dm_pages.c, [2] pouch dm_pouch.c, [1] chronicle vault dm_vault.c, [3] rift progress dm_rift.c)
  void (*g_dm_save_commit_hook)(const char *commit_dir);   // 存档提交成功后调（已提交目录）；iOS 的 iCloud 同步设它，宿主为空 | called after a save commit succeeds (committed directory); the iOS iCloud sync sets it, NULL on the host
  static _Atomic uint64_t g_save_commits;   // 成功提交过几次（前端进后台时等「游戏这次存盘已提交」用） | number of successful commits (used by the front end when going to background to wait for "the game's current save has been committed")
+ uint64_t dm_fs_commit_count(void) { return atomic_load(&g_save_commits); }
+-HLE_FORCE("_ZN2nn2fs6CommitEPKc", "fsp-srv；事务式存档：工作目录整树 clone 后与已提交目录原子互换（renamex_np RENAME_SWAP）", Result, h_fs_Commit, const char *name) {
+-    PATH_LOCK(); pthread_mutex_lock(&g_lock);
++static Result fs_commit_locked(const char *name) {
++    pthread_mutex_lock(&g_lock);
+     int i = 0; while (i < g_nmnt && strcmp(g_mnt[i].name, name)) i++;
+     if (i == g_nmnt || !g_mnt[i].commit[0]) { pthread_mutex_unlock(&g_lock); return RES_OK; }   // 非事务挂载：无可提交 | non-transactional mount: nothing to commit
+     uint64_t tc0 = clock_gettime_nsec_np(CLOCK_MONOTONIC), tw0 = atomic_exchange(&g_txn_first_ns, 0);
+@@ -534,6 +560,41 @@ HLE_FORCE("_ZN2nn2fs6CommitEPKc", "fsp-srv；事务式存档：工作目录整
+     pthread_mutex_unlock(&g_lock);
+     return r;
+ }
++HLE_FORCE("_ZN2nn2fs6CommitEPKc", "fsp-srv；工作目录克隆后与已提交目录原子互换", Result, h_fs_Commit, const char *name) {
++    if (!name) return RES_FAIL;
++    PATH_LOCK(); return fs_commit_locked(name);
++}
++HLE_FORCE("_ZN2nn2fs6CommitEPKcRKNS0_12CommitOptionE", "fsp-srv；SDK 20 提交及恢复标记共同进入事务", Result, h_fs_CommitOption, const char *name, const void *option) {
++    if (!name || !option) return RES_FAIL;
++    uint32_t flags; memcpy(&flags, option, 4);
++    if (flags > 2) { LOG("【红】CommitOption 未支持的标志 %#x", flags); return RES_FAIL; }
++    PATH_LOCK();
++    if (flags) {
++        pthread_mutex_lock(&g_lock);
++        int i = 0; while (i < g_nmnt && strcmp(g_mnt[i].name, name)) i++;
++        if (i == g_nmnt || !g_mnt[i].commit[0]) { pthread_mutex_unlock(&g_lock); return RES_PATH_NOT_FOUND; }
++        uint8_t restore = flags == 2;
++        if (setxattr(g_mnt[i].dir, SAVE_RESTORE_ATTR, &restore, 1, 0, 0)) save_poison(errno);
++        pthread_mutex_unlock(&g_lock);
++    }
++    return fs_commit_locked(name);
++}
++HLE_FORCE("_ZN2nn2fs6CommitEPKPKci", "fsp-srv；同一设备存档事务组原子提交，跨独立目录明确报错", Result, h_fs_CommitGroup, const char *const *names, int count) {
++    if (count < 0 || count > MAX_MOUNT || (count && !names)) return RES_FAIL;
++    if (!count) return RES_OK;
++    PATH_LOCK(); pthread_mutex_lock(&g_lock);
++    const char *selected = NULL; char commit[1024] = ""; Result result = RES_OK;
++    for (int j = 0; j < count; j++) {
++        if (!names[j]) { result = RES_FAIL; break; }
++        int i = 0; while (i < g_nmnt && strcmp(g_mnt[i].name, names[j])) i++;
++        if (i == g_nmnt) { result = RES_PATH_NOT_FOUND; break; }
++        if (!g_mnt[i].commit[0]) continue;
++        if (selected && strcmp(commit, g_mnt[i].commit)) { LOG("【红】跨独立目录的原子提交尚未实现：未提交任何目录"); result = RES_FAIL; break; }
++        selected = names[j]; strlcpy(commit, g_mnt[i].commit, sizeof commit);
++    }
++    pthread_mutex_unlock(&g_lock);
++    return result != RES_OK ? result : selected ? fs_commit_locked(selected) : RES_OK;
++}
+ HLE_FORCE("_ZN2nn2fs7UnmountEPKc", "fsp-srv；挂载表常驻，卸载为空操作", void, h_fs_Unmount, const char *name) { (void)name; }
+ 
+ // ---------- 文件 ----------
 diff --git a/dm/host/tests/t_fs.c b/dm/host/tests/t_fs.c
-index 57de93d..167dc03 100644
+index 57de93d..fb9bdab 100644
 --- a/dm/host/tests/t_fs.c
 +++ b/dm/host/tests/t_fs.c
-@@ -183,6 +183,20 @@ int main(void) {
+@@ -183,6 +183,46 @@ int main(void) {
      snprintf(p, sizeof p, "%s/a", save); CHECK(same(p, "ok3"), "已提交 a = ok3");
  
  
@@ -348,6 +429,11 @@ index 57de93d..167dc03 100644
 +    // ACNH device saves must remain transactional: uncommitted writes preserve the committed directory, and failed commits restore it.
 +    g_nmnt = 0;
 +    CHECK(h_fs_MountDeviceSave("island") == RES_OK, "设备存档挂载成功");
++    uint8_t restore_bytes[3] = {0xa5, 0xff, 0x5a};
++    CHECK(h_fs_GetRestoreFlag(&restore_bytes[1], "island") == RES_OK && restore_bytes[1] == 0 && restore_bytes[0] == 0xa5 && restore_bytes[2] == 0x5a, "设备存档恢复标记为 false，且只写一个字节");
++    restore_bytes[1] = 0xff;
++    CHECK(h_fs_GetRestoreFlag(&restore_bytes[1], "missing") != RES_OK && restore_bytes[1] == 0xff, "不存在的挂载查询失败，不伪造输出");
++    CHECK(h_fs_GetRestoreFlag(NULL, "island") != RES_OK, "拒绝空的恢复标记输出指针");
 +    CHECK(write_save("island:/a", "island1") == RES_OK, "设备存档写工作目录");
 +    snprintf(p, sizeof p, "%s/a", save); CHECK(same(p, "ok3"), "设备存档提交前仍是已提交的 ok3");
 +    CHECK(h_fs_Commit("island") == RES_OK && same(p, "island1"), "设备存档 Commit 发布完整新版本");
@@ -357,6 +443,27 @@ index 57de93d..167dc03 100644
 +    CHECK(h_fs_Commit("island") != RES_OK && same(p, "island1"), "设备存档失败提交保留旧版");
 +    char island_got[64];
 +    CHECK(read_fs("island:/a", island_got, sizeof island_got) && !strcmp(island_got, "island1"), "设备存档失败后工作目录恢复旧版");
++    uint32_t restore_option = 2, clear_option = 1, normal_option = 0, bad_option = 3;
++    CHECK(write_save("island:/a", "restored") == RES_OK && h_fs_CommitOption("island", &restore_option) == RES_OK, "带恢复标记的提交成功");
++    restore_bytes[1] = 0;
++    CHECK(h_fs_GetRestoreFlag(&restore_bytes[1], "island") == RES_OK && restore_bytes[1] == 1 && same(p, "restored"), "数据与恢复标记一起提交");
++    g_mode = 1; g_calls = 0;
++    CHECK(write_save("island:/a", "broken") != RES_OK, "带标记事务注入写失败");
++    g_mode = 0;
++    CHECK(h_fs_CommitOption("island", &clear_option) != RES_OK && same(p, "restored"), "失败事务不能清除已提交标记或更改数据");
++    restore_bytes[1] = 0;
++    CHECK(h_fs_GetRestoreFlag(&restore_bytes[1], "island") == RES_OK && restore_bytes[1] == 1, "回滚后恢复标记仍为 true");
++    CHECK(h_fs_CommitOption("island", &clear_option) == RES_OK, "清除恢复标记提交成功");
++    CHECK(h_fs_GetRestoreFlag(&restore_bytes[1], "island") == RES_OK && restore_bytes[1] == 0, "清除后的标记跨克隆保留");
++    CHECK(h_fs_CommitOption("island", &bad_option) != RES_OK && same(p, "restored"), "未知提交标志明确失败，已提交版不变");
++    CHECK(h_fs_CommitOption("island", &normal_option) == RES_OK, "普通选项提交成功");
++    const char *group_names[] = {"island"};
++    CHECK(write_save("island:/a", "group") == RES_OK && h_fs_CommitGroup(group_names, 1) == RES_OK && same(p, "group"), "单设备存档事务组提交成功");
++    CHECK(h_fs_CommitGroup(NULL, 0) == RES_OK && h_fs_CommitGroup(group_names, -1) != RES_OK, "空事务组为空操作，负数计数拒绝");
++    char other[1200]; snprintf(other, sizeof other, "%s/second", root);
++    CHECK(mount_ex("second", other, 0, 1) == RES_OK, "建立独立存档事务目录用于失败检查");
++    const char *two_groups[] = {"island", "second"};
++    CHECK(write_save("island:/a", "pending") == RES_OK && h_fs_CommitGroup(two_groups, 2) != RES_OK && same(p, "group"), "跨独立目录未支持时不进行部分提交");
 +
      // 语言开关改写设置文件（settings_lang_apply）：期望值按规则手算——只在「与开关不符」时把 Language / VoiceLanguage 改成 0（英文）或 8（简中），别的键和别的语言不动
      // Language switch rewriting the settings file (settings_lang_apply): expected values computed by hand from the rule -- only when it "does not match the switch" are Language / VoiceLanguage changed to 0 (English) or 8 (Simplified Chinese); other keys and other languages are untouched
