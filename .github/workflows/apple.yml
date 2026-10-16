@@ -158,6 +158,7 @@ jobs:
             output/chain.txt
             output/shader-reuse.json
             output/captured-shaders.json
+            output/acnh-symbols.zip
             source/dm/games/acnh/
             source/dm/gfx/tools/dmsh_chain.lock
           if-no-files-found: warn

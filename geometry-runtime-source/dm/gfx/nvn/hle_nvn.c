@@ -1043,11 +1043,11 @@ static void dump_frame(void) {
     if (g_frame <= (uint64_t)nframes) LOG("[nvn] %s %llu: %u functions, %llu calls |%s", g_frame ? "frame" : "initialization", g_frame, nfn, total, line);
     else if (g_frame % 300 == 0) LOG("[nvn] frame %llu: %u functions, %llu calls", g_frame, nfn, total);
     g_frame++; cs_dump();
-    // 每 300 帧读一次常驻内存，交图形层打内存读数行（mtl_mem_stat，低频封顶）。内存看门狗：常驻超过上限就报红自行退出——只在 Mac 宿主上缺省开（24 GB：宿主内存失控
+    // 每 60 帧采样常驻内存，交图形层按变化与内存压力打读数行（mtl_mem_stat，低频封顶）。内存看门狗：常驻超过上限就报红自行退出——只在 Mac 宿主上缺省开（24 GB：宿主内存失控
     // 会把整机拖进内核崩溃，同机别的程序两次如此），或测试时用 DM_MEM_CAP_GB=<整数> 指定；玩家的 iOS 包不设上限（被系统杀之前自己退没有意义，反而多一种闪退）
-    // Every 300 frames read resident memory and hand it to the graphics layer to print the memory readout line (mtl_mem_stat, low frequency, capped). Memory watchdog: when resident memory exceeds the cap, log a failure and exit on its own. On by default only on the Mac host (24 GB: runaway host memory
+    // Every 60 frames sample resident memory; the graphics layer logs changes and memory pressure (mtl_mem_stat, low frequency, capped). Memory watchdog: when resident memory exceeds the cap, log a failure and exit on its own. On by default only on the Mac host (24 GB: runaway host memory
     // drags the whole machine into a kernel panic, which happened twice with other programs on the same machine), or set for tests with DM_MEM_CAP_GB=<integer>; the player's iOS app has no cap (exiting before the system kills it is pointless and only adds another kind of crash)
-    if (g_frame % 300 == 0 || (g_frame < 300 && g_frame % 60 == 0)) { task_vm_info_data_t vi; mach_msg_type_number_t cnt = TASK_VM_INFO_COUNT;
+    if (g_frame % 60 == 0) { task_vm_info_data_t vi; mach_msg_type_number_t cnt = TASK_VM_INFO_COUNT;
         if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &cnt) == KERN_SUCCESS) { unsigned long long mb = (unsigned long long)(vi.phys_footprint >> 20); void mtl_mem_stat(unsigned long long, unsigned long long); mtl_mem_stat(g_frame, mb);
             static long cap = -1; if (cap < 0) { const char *e = getenv("DM_MEM_CAP_GB"); cap = e ? atol(e) : DM_MEM_CAP_DEFAULT_GB; }
             if (cap > 0 && mb > (unsigned long long)cap * 1024) { LOG("[ERROR] memory watchdog: resident=%llu MB exceeds limit=%ld GB (frame=%llu); exiting", mb, cap, (unsigned long long)g_frame); _exit(86); } } }

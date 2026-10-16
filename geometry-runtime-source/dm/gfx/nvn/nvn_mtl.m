@@ -169,22 +169,26 @@ static void defer_obj_release_ex(id obj, int keep_resident) {
 static void defer_obj_release(id obj) { defer_obj_release_ex(obj, 0); }
 static void defer_obj_unref(id obj) { defer_obj_release_ex(obj, 1); }
 static void defer_drain(void) {
-    NSMutableArray<NvDeferredRelease *> *ready = [NSMutableArray array];
-    pthread_mutex_lock(&g_deferred_mu);
-    for (NSInteger i = g_deferred.count - 1; i >= 0; i--) {
-        NvDeferredRelease *d = g_deferred[(NSUInteger)i];
-        if (d->fence <= g_done) { [ready addObject:d]; [g_deferred removeObjectAtIndex:(NSUInteger)i]; }
-    }
-    pthread_mutex_unlock(&g_deferred_mu);
-    for (NvDeferredRelease *d in ready) {
-        id obj = d->object;
-        if (!d->keep_resident && [obj conformsToProtocol:@protocol(MTLResource)]) {
-            pthread_mutex_lock(&g_res_mu);
-            int registered = [g_res_objects containsObject:obj];
-            pthread_mutex_unlock(&g_res_mu);
-            if (registered) res_remove((id<MTLResource>)obj);
+    // 加载线程可能没有会排空的外层池；临时对象在本次生命周期操作结束时回收。
+    // Loading threads may have no draining outer pool; release temporaries at this lifecycle boundary.
+    @autoreleasepool {
+        NSMutableArray<NvDeferredRelease *> *ready = [NSMutableArray array];
+        pthread_mutex_lock(&g_deferred_mu);
+        for (NSInteger i = g_deferred.count - 1; i >= 0; i--) {
+            NvDeferredRelease *d = g_deferred[(NSUInteger)i];
+            if (d->fence <= g_done) { [ready addObject:d]; [g_deferred removeObjectAtIndex:(NSUInteger)i]; }
         }
-        d->object = nil;
+        pthread_mutex_unlock(&g_deferred_mu);
+        for (NvDeferredRelease *d in ready) {
+            id obj = d->object;
+            if (!d->keep_resident && [obj conformsToProtocol:@protocol(MTLResource)]) {
+                pthread_mutex_lock(&g_res_mu);
+                int registered = [g_res_objects containsObject:obj];
+                pthread_mutex_unlock(&g_res_mu);
+                if (registered) res_remove((id<MTLResource>)obj);
+            }
+            d->object = nil;
+        }
     }
 }
 
@@ -358,31 +362,39 @@ static void pool_res(int i) {
     res_add(g_pools[i].buf); res_commit(); g_pools[i].res = 1; g_pool_res_n++;
 }
 void mtl_pool_add(const void *mem, uint64_t size) {
-    mtl_init(); g_reg_gen++;
-    uintptr_t pg = (uintptr_t)getpagesize(), lo = (uintptr_t)mem, hi = lo + size;
-    uintptr_t a = lo & ~(pg - 1), b = (hi + pg - 1) & ~(pg - 1);
-    id<MTLBuffer> buf = [g_dev newBufferWithBytesNoCopy:(void *)a length:b - a options:MTLResourceStorageModeShared deallocator:nil];
-    if (!buf) MDIE("failed to create zero-copy buffer for pool %p+%#llx", mem, (unsigned long long)size);
-    pthread_mutex_lock(&g_mu);
-    if (g_npool == g_cap) { g_cap = g_cap ? g_cap * 2 : 64; g_pools = realloc(g_pools, g_cap * sizeof *g_pools); }
-    g_pools[g_npool++] = (pool_ent){lo, hi, a, buf, buf.gpuAddress, mem, 0};   // 先不进驻留集：第一次被取址时才放（pool_res） | not in the residency set yet: put in the first time it is addressed (pool_res)
-    g_pool_adds++;
-    [g_keep addObject:buf];
-    pthread_mutex_unlock(&g_mu);
+    // 加载线程可能没有会排空的外层池；临时对象在本次生命周期操作结束时回收。
+    // Loading threads may have no draining outer pool; release temporaries at this lifecycle boundary.
+    @autoreleasepool {
+        mtl_init(); g_reg_gen++;
+        uintptr_t pg = (uintptr_t)getpagesize(), lo = (uintptr_t)mem, hi = lo + size;
+        uintptr_t a = lo & ~(pg - 1), b = (hi + pg - 1) & ~(pg - 1);
+        id<MTLBuffer> buf = [g_dev newBufferWithBytesNoCopy:(void *)a length:b - a options:MTLResourceStorageModeShared deallocator:nil];
+        if (!buf) MDIE("failed to create zero-copy buffer for pool %p+%#llx", mem, (unsigned long long)size);
+        pthread_mutex_lock(&g_mu);
+        if (g_npool == g_cap) { g_cap = g_cap ? g_cap * 2 : 64; g_pools = realloc(g_pools, g_cap * sizeof *g_pools); }
+        g_pools[g_npool++] = (pool_ent){lo, hi, a, buf, buf.gpuAddress, mem, 0};   // 先不进驻留集：第一次被取址时才放（pool_res） | not in the residency set yet: put in the first time it is addressed (pool_res)
+        g_pool_adds++;
+        [g_keep addObject:buf];
+        pthread_mutex_unlock(&g_mu);
+    }
 }
 
 void mtl_pool_del(const void *mem) {
-    g_reg_gen++;
-    pthread_mutex_lock(&g_mu);
-    // 零拷贝缓冲走延迟释放（提交过的命令跑完后出驻留集、放引用）。原先只从 g_keep 拿掉，驻留集还强引用着它：池释放后缓冲一直活着、包着那段客体内存，
-    // 客体再在原地址建池又包一份。Engage 的标题演示循环换场景，显卡已分配 850 s 里涨到 5.4 GB、常驻涨到 3.6 GB
-    // The no-copy buffer goes through deferred release (out of the residency set and unreferenced after submitted commands complete). It used to be removed only from g_keep while the residency set still held a strong reference: after the pool was freed the buffer stayed alive wrapping that guest memory,
-    // and a new pool at the same address wrapped it again. Engage's title demo cycles scenes; GPU allocated grew to 5.4 GB and resident memory to 3.6 GB in 850 s
-    for (int i = 0; i < g_npool; i++)
-        if (g_pools[i].key == mem) { id<MTLBuffer> b = g_pools[i].buf; [g_keep removeObject:b]; defer_obj_release(b); if (g_pools[i].res) g_pool_res_n--;
-            if (!g_dead_pools) g_dead_pools = [NSHashTable weakObjectsHashTable];
-            [g_dead_pools addObject:b]; g_pools[i] = g_pools[--g_npool]; break; }
-    pthread_mutex_unlock(&g_mu);
+    // 加载线程可能没有会排空的外层池；临时对象在本次生命周期操作结束时回收。
+    // Loading threads may have no draining outer pool; release temporaries at this lifecycle boundary.
+    @autoreleasepool {
+        g_reg_gen++;
+        pthread_mutex_lock(&g_mu);
+        // 零拷贝缓冲走延迟释放（提交过的命令跑完后出驻留集、放引用）。原先只从 g_keep 拿掉，驻留集还强引用着它：池释放后缓冲一直活着、包着那段客体内存，
+        // 客体再在原地址建池又包一份。Engage 的标题演示循环换场景，显卡已分配 850 s 里涨到 5.4 GB、常驻涨到 3.6 GB
+        // The no-copy buffer goes through deferred release (out of the residency set and unreferenced after submitted commands complete). It used to be removed only from g_keep while the residency set still held a strong reference: after the pool was freed the buffer stayed alive wrapping that guest memory,
+        // and a new pool at the same address wrapped it again. Engage's title demo cycles scenes; GPU allocated grew to 5.4 GB and resident memory to 3.6 GB in 850 s
+        for (int i = 0; i < g_npool; i++)
+            if (g_pools[i].key == mem) { id<MTLBuffer> b = g_pools[i].buf; [g_keep removeObject:b]; defer_obj_release(b); if (g_pools[i].res) g_pool_res_n--;
+                if (!g_dead_pools) g_dead_pools = [NSHashTable weakObjectsHashTable];
+                [g_dead_pools addObject:b]; g_pools[i] = g_pools[--g_npool]; break; }
+        pthread_mutex_unlock(&g_mu);
+    }
 }
 
 int mtl_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off) {
@@ -703,6 +715,9 @@ static uint64_t g_up_total_ns;   // 上传累计耗时（与逐帧 @upload_ms �
 #define GRING 1024
 static struct { _Atomic uint64_t frame, ns, t0, t1; _Atomic int pending; } g_gpu[GRING];   // t0 / t1：该帧最早 GPUStart / 最晚 GPUEnd（mach 绝对时间 ns） | t0 / t1: the frame's earliest GPUStart / latest GPUEnd (mach absolute time, ns)
 static _Atomic uint64_t g_cur_frame;
+// 后台采样只读原子帧号，不等待提交线程的锁。
+// Background sampling reads only the atomic frame number, without waiting on submission locks.
+uint64_t dm_mtl_diag_frame_sample(void) { return atomic_load_explicit(&g_cur_frame, memory_order_relaxed); }
 // ---------- 同进程交替测量（DM_NVN_UB，缺省无：不设环境变量时下面只多一次「是否启用」的判断） ----------
 // 真机热态下系统持续调功率 / 频率，分段对比（A 段、B 段各跑一分钟）分不清 <10% 的差；在同一局里按相轮流开关、相邻相配对取差，漂移对消。
 // DM_NVN_UB="名字=项,项;名字=项"，每 DM_NVN_UB_N 帧（缺省 180，下限 60）一相：偶数相 = 基准（什么都不改），奇数相轮流取一类。一类里的每一项：
@@ -926,26 +941,30 @@ static int alias_has(id o) { return g_alias_set && o && CFSetContainsValue(g_ali
 // Also, when a pool object's address is reused, old entries would hand a texture on the old storage to the new pool's texture at the same offset and description. Evicted textures go through deferred release; if the serial table still holds one, that is just one more reference
 static void treg_drop_pool_views(const void *pool);
 void mtl_alias_drop_pool(const void *pool) {
-    if (!pool) return;
-    pthread_mutex_lock(&g_smu);
-    uint32_t n = 0; alias_key *ks = NULL;
-    for (uint32_t i = 0; i < g_alias.cap; i++) {
-        if (!g_alias.vals[i]) continue;
-        alias_key k; memcpy(&k, g_alias.keys + (size_t)i * g_alias.klen, sizeof k);
-        if (k.pool != (uint64_t)(uintptr_t)pool) continue;
-        alias_key *nk = realloc(ks, (n + 1) * sizeof *ks); if (!nk) break; ks = nk; ks[n++] = k;
+    // 加载线程可能没有会排空的外层池；临时对象在本次生命周期操作结束时回收。
+    // Loading threads may have no draining outer pool; release temporaries at this lifecycle boundary.
+    @autoreleasepool {
+        if (!pool) return;
+        pthread_mutex_lock(&g_smu);
+        uint32_t n = 0; alias_key *ks = NULL;
+        for (uint32_t i = 0; i < g_alias.cap; i++) {
+            if (!g_alias.vals[i]) continue;
+            alias_key k; memcpy(&k, g_alias.keys + (size_t)i * g_alias.klen, sizeof k);
+            if (k.pool != (uint64_t)(uintptr_t)pool) continue;
+            alias_key *nk = realloc(ks, (n + 1) * sizeof *ks); if (!nk) break; ks = nk; ks[n++] = k;
+        }
+        for (uint32_t j = 0; j < n; j++) {
+            void *old = nvn_hm_del(&g_alias, &ks[j]);
+            if (!old) continue;
+            id o = CFBridgingRelease(old);
+            if (g_alias_set) CFSetRemoveValue(g_alias_set, (__bridge const void *)o);
+            defer_obj_release(o);
+        }
+        if (n) { g_ser_gen++; g_alias_evicted += n; }
+        pthread_mutex_unlock(&g_smu);
+        free(ks);
+        treg_drop_pool_views(pool);   // 在 g_smu 外：贴图号登记表的锁 g_rmu 在 g_smu 之前取 | outside g_smu: the texture ID registry lock g_rmu is taken before g_smu
     }
-    for (uint32_t j = 0; j < n; j++) {
-        void *old = nvn_hm_del(&g_alias, &ks[j]);
-        if (!old) continue;
-        id o = CFBridgingRelease(old);
-        if (g_alias_set) CFSetRemoveValue(g_alias_set, (__bridge const void *)o);
-        defer_obj_release(o);
-    }
-    if (n) { g_ser_gen++; g_alias_evicted += n; }
-    pthread_mutex_unlock(&g_smu);
-    free(ks);
-    treg_drop_pool_views(pool);   // 在 g_smu 外：贴图号登记表的锁 g_rmu 在 g_smu 之前取 | outside g_smu: the texture ID registry lock g_rmu is taken before g_smu
 }
 static __unsafe_unretained id serial_get(uint64_t k) { pthread_mutex_lock(&g_smu); __unsafe_unretained id o = hm_get_id(&g_by_serial, &k); pthread_mutex_unlock(&g_smu); return o; }
 static void serial_put(uint64_t k, id o) { pthread_mutex_lock(&g_smu); id old = hm_get_id(&g_by_serial, &k); if (old) { if (alias_has(old)) defer_obj_unref(old); else defer_obj_release(old); } hm_put_id(&g_by_serial, &k, o); g_ser_gen++; pthread_mutex_unlock(&g_smu); }

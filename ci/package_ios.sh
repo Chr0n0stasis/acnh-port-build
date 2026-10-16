@@ -28,7 +28,15 @@ printf '{"images":[{"filename":"icon.png","idiom":"universal","platform":"ios","
 printf 'DM_APPICON = AppIcon\n' >> Gen/dm.xcconfig
 python3 -c 'from PIL import Image; i=Image.open("Gen/Assets.xcassets/AppIcon.appiconset/icon.png"); assert i.size == (1024,1024) and i.mode == "RGB", (i.size,i.mode)'
 xcodegen generate -q
-xcodebuild -project DmIOS.xcodeproj -scheme DmIOS -configuration Release -destination 'generic/platform=iOS' -derivedDataPath "$ROOT/work/dd" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= build > "$ROOT/output/ios-build.log" 2>&1
+xcodebuild -project DmIOS.xcodeproj -scheme DmIOS -configuration Release -destination 'generic/platform=iOS' -derivedDataPath "$ROOT/work/dd" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= DEBUG_INFORMATION_FORMAT=dwarf-with-dsym GCC_GENERATE_DEBUGGING_SYMBOLS=YES build > "$ROOT/output/ios-build.log" 2>&1
+# Keep matching symbols and the executable for device-report symbolication; retain Release optimization.
+SYMBOLS="$ROOT/output/symbols"
+mkdir -p "$SYMBOLS"
+cp -R "$ROOT/work/dd/Build/Products/Release-iphoneos/DmIOS.app.dSYM" "$SYMBOLS/"
+cp "$ROOT/work/dd/Build/Products/Release-iphoneos/DmIOS.app/DmIOS" "$SYMBOLS/"
+xcrun dwarfdump --uuid "$SYMBOLS/DmIOS" "$SYMBOLS/DmIOS.app.dSYM" > "$SYMBOLS/UUIDS.txt"
+printf 'Commit: %s\nShader chain: %s\n' "${GITHUB_SHA:-unknown}" "$CHAIN" >> "$SYMBOLS/UUIDS.txt"
+(cd "$ROOT/output" && zip -qry acnh-symbols.zip symbols)
 mkdir -p "$ROOT/output/Payload"
 cp -R "$ROOT/work/dd/Build/Products/Release-iphoneos/DmIOS.app" "$ROOT/output/Payload/"
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$ROOT/output/Payload/DmIOS.app/Info.plist")" = "$DM_BUNDLE_ID"
