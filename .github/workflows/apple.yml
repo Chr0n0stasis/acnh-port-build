@@ -54,9 +54,9 @@ jobs:
           gh release download "$INPUT_TAG" --repo "$GITHUB_REPOSITORY" --pattern build-inputs.zip
           shasum -a 256 -c input-sha256.txt
           unzip -q build-inputs.zip -d work
-          gh release download "$INPUT_TAG" --repo "$GITHUB_REPOSITORY" --pattern captured-shaders-20261016-movie.zip
+          gh release download "$INPUT_TAG" --repo "$GITHUB_REPOSITORY" --pattern captured-shaders-20261016-postmovie.zip
           shasum -a 256 -c captured-shaders-sha256.txt
-          unzip -q captured-shaders-20261016-movie.zip -d work/captured-shaders
+          unzip -q captured-shaders-20261016-postmovie.zip -d work/captured-shaders
       - name: Restore SPIRV-Cross compiler
         id: compiler-cache
         uses: actions/cache/restore@v4

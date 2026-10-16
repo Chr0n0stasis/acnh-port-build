@@ -1520,14 +1520,21 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
 }
 // 内存读数行（常开、低频、封顶）：常驻内存、显卡已分配、延迟释放队列、驻留集对象数、在册内存池数 / 峰值 / 跟踪表容量、贴图重传累计。
 // 用途：定「没有日志的闪退」——系统按内存杀进程前不给任何通知，只有事先留下的读数能说明是哪个数一路往上涨。
-// 每 300 帧由帧钩子调一次；常驻或显卡已分配比上一行变了 ≥ 64 MB 才打，否则每 3000 帧打一行；一局封顶 400 行。全是整数（帧钩子在客体线程的小栈上，不用浮点格式）
+// 每 60 帧由帧钩子调一次；常驻或显卡已分配比上一行变了 ≥ 64 MB 才打，否则每 3000 帧打一行；一局封顶 400 行。全是整数（帧钩子在客体线程的小栈上，不用浮点格式）
 // Memory readout line (always on, low frequency, capped): resident memory, GPU allocated, deferred-release queue, residency set object count, registered memory pools / peak / tracking table capacity, cumulative texture re-uploads.
 // Purpose: pin down "crashes with no log". The system gives no notice before killing a process for memory, so only readouts left beforehand can show which number kept climbing.
-// Called by the frame hook every 300 frames; printed only when resident or GPU allocated changed by ≥ 64 MB since the last line, otherwise one line every 3000 frames; capped at 400 lines per game. All integers (the frame hook runs on the guest thread's small stack, so no floating-point formatting)
+// Called by the frame hook every 60 frames; printed only when resident or GPU allocated changed by ≥ 64 MB since the last line, otherwise one line every 3000 frames; capped at 400 lines per game. All integers (the frame hook runs on the guest thread's small stack, so no floating-point formatting)
 void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
     static unsigned long long last_rss, last_gpu, last_frame; static int lines; unsigned long long gpu = (unsigned long long)(g_dev.currentAllocatedSize >> 20);
     unsigned long long dr = rss_mb > last_rss ? rss_mb - last_rss : last_rss - rss_mb, dg = gpu > last_gpu ? gpu - last_gpu : last_gpu - gpu;
-    if (lines >= 400 || (lines && dr < 64 && dg < 64 && frame - last_frame < 3000)) return; lines++; last_rss = rss_mb; last_gpu = gpu; last_frame = frame;
+    // 余量小于 512 MiB 时每 60 帧留记录；系统终止进程前可能没有通知。
+    // Below 512 MiB headroom, record every 60 frames; termination may arrive without notification.
+    unsigned long long headroom_mb = UINT64_MAX;
+#if TARGET_OS_IPHONE
+    headroom_mb = (unsigned long long)(os_proc_available_memory() >> 20);
+#endif
+    if (lines >= 400 || (lines && headroom_mb >= 512 && dr < 64 && dg < 64 && frame - last_frame < 3000)) return;
+    lines++; last_rss = rss_mb; last_gpu = gpu; last_frame = frame;
     pthread_mutex_lock(&g_deferred_mu); unsigned long nd = (unsigned long)g_deferred.count; pthread_mutex_unlock(&g_deferred_mu);
     pthread_mutex_lock(&g_res_mu); unsigned long nr = (unsigned long)g_res_objects.count; pthread_mutex_unlock(&g_res_mu);
     int live = 0, peak = 0, cap = 0; nvn_dirty_stat(&live, &peak, &cap);
@@ -1540,7 +1547,7 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
     // os_proc_available_memory: how far this process is from being terminated by the system for memory, iOS only (from d2r-mobile 704147218); the Mac writes 「无」(none). On a phone, a crash with no log is most likely this number reaching 0
     char avail[32] = "none";
 #if TARGET_OS_IPHONE
-    snprintf(avail, sizeof avail, "%llu MB", (unsigned long long)(os_proc_available_memory() >> 20));
+    snprintf(avail, sizeof avail, "%llu MB", headroom_mb);
 #endif
     MLOG("memory through frame %llu: resident=%llu MB GPU allocated=%llu MB deferred releases=%lu residency objects=%lu serial objects=%u pools=%d (resident=%d peak=%d tableCapacity=%d releasedStillAlive=%lu / %llu MB) shared textures=%u (pool evictions=%llu), texture reuploads=%llu, per-frame arena allocations=%llu; system memory headroom=%s", frame, rss_mb, gpu, nd, nr, ns, live, pres, peak, cap, dead_n, dead_mb, ashared, (unsigned long long)g_alias_evicted, (unsigned long long)g_pkg_reuploads, (unsigned long long)g_arena_made, avail);
     if (g_allocprof > 0) { char ab[256]; int o = 0; for (int i = 0; i < g_alloc_n && o < 200; i++) o += snprintf(ab + o, sizeof ab - o, " #%d %llu MB", i, (unsigned long long)(g_alloc4[i].allocatedSize >> 20));
