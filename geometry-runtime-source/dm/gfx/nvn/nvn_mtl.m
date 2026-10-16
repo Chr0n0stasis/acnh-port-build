@@ -1006,6 +1006,37 @@ static int tex_drop(const tex_t *t) {
     return s;
 }
 static uint64_t g_drop_tex, g_drop_bytes;
+// Allocation burst diagnostics: sums the GPU memory requested by texture and staging creation inside a 1 s window and logs every 64 MB step,
+// with the largest single item and the real growth of Metal's allocated size, so a load-time spike can be attributed to a source (or shown to come from an untracked one).
+enum { AB_PKG_TEX, AB_PLAIN_TEX, AB_STAGING, AB_N };
+static const char *const k_ab_name[AB_N] = {"pre-tiled textures", "plain textures", "upload staging"};
+static pthread_mutex_t g_ab_mu = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t g_ab_start_ns, g_ab_win, g_ab_next = 64ull << 20, g_ab_max, g_ab_dev0;
+static uint64_t g_ab_cat[AB_N], g_ab_cnt[AB_N];
+static char g_ab_maxdesc[96];
+static void ab_note(int cat, uint64_t bytes, uint32_t w, uint32_t h, uint32_t fmt) {
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    uint64_t now = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+    pthread_mutex_lock(&g_ab_mu);
+    if (now - g_ab_start_ns > 1000000000ull) {
+        g_ab_start_ns = now; g_ab_win = 0; g_ab_next = 64ull << 20; g_ab_max = 0; g_ab_dev0 = (uint64_t)g_dev.currentAllocatedSize;
+        memset(g_ab_cat, 0, sizeof g_ab_cat); memset(g_ab_cnt, 0, sizeof g_ab_cnt); g_ab_maxdesc[0] = 0;
+    }
+    g_ab_win += bytes; g_ab_cat[cat] += bytes; g_ab_cnt[cat]++;
+    if (bytes > g_ab_max) { g_ab_max = bytes; snprintf(g_ab_maxdesc, sizeof g_ab_maxdesc, "%s %ux%u format=%#x", k_ab_name[cat], w, h, fmt); }
+    if (g_ab_win >= g_ab_next) {
+        uint64_t cur = (uint64_t)g_dev.currentAllocatedSize;
+        g_ab_next = (g_ab_win | ((64ull << 20) - 1)) + 1;
+        MLOG("allocation burst: %llu MB requested within 1 s (%s %llu MB x%llu, %s %llu MB x%llu, %s %llu MB x%llu); largest %llu MB: %s; Metal allocated %+lld MB since window start (now %llu MB)",
+             (unsigned long long)(g_ab_win >> 20),
+             k_ab_name[0], (unsigned long long)(g_ab_cat[0] >> 20), (unsigned long long)g_ab_cnt[0],
+             k_ab_name[1], (unsigned long long)(g_ab_cat[1] >> 20), (unsigned long long)g_ab_cnt[1],
+             k_ab_name[2], (unsigned long long)(g_ab_cat[2] >> 20), (unsigned long long)g_ab_cnt[2],
+             (unsigned long long)(g_ab_max >> 20), g_ab_maxdesc,
+             (long long)(((int64_t)cur - (int64_t)g_ab_dev0) / (1 << 20)), (unsigned long long)(cur >> 20));
+    }
+    pthread_mutex_unlock(&g_ab_mu);
+}
 static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {
     uint32_t pf = 0; uint8_t swz[4];
     if (!nvn_fmt_to_mtl(t->d.format, &pf, swz) || !pf) { RED_ONCE(0, "texture format %#x has no Metal mapping (first occurrence)", t->d.format); return nil; }
@@ -1243,6 +1274,7 @@ static id<MTLBuffer> up_alloc(size_t n, size_t *off) {
         g_up_block = [g_dev newBufferWithLength:g_up_block_size options:MTLResourceStorageModePrivate];
         if (!g_up_block) MDIE("pre-tiled upload staging allocation failed %#zx", g_up_block_size);
         res_add(g_up_block);
+        ab_note(AB_STAGING, g_up_block_size, 0, 0, 0);
         g_up_block_off = 0;
     }
     *off = g_up_block_off;
@@ -1307,6 +1339,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp) {
         total += unp ? (size_t)w * ubpp * h * z * layers : (size_t)((w + bw - 1) / bw) * bpb * ((h + bh - 1) / bh) * z * layers;
     }
     g_bp_up_bytes += total;
+    ab_note(AB_PKG_TEX, total, t->d.width, t->d.height, t->d.format);
     void *mb; uint64_t mo;
     int gdec = unp && t->d.target != 2 && bcd_fmt(t->d.format) && bcd_pso();   // 无 BC 的 BC1–5：GPU 解排布 + GPU 解压 | BC1–5 without BC: GPU deswizzle + GPU decompression
     size_t ctotal = 0;   // 压缩块的暂存大小（GPU 解压时暂存区放的是压缩块） | Staging size of the compressed blocks (with GPU decompression the staging area holds compressed blocks)
@@ -1351,6 +1384,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp) {
 
     up_begin();
     id<MTLBuffer> stg = [g_dev newBufferWithLength:total ? total : 16 options:MTLResourceStorageModeShared];
+    ab_note(AB_STAGING, total, 0, 0, 0);
     res_add(stg); [g_up_keep addObject:stg];
     size_t off = 0;
     for (unsigned l = ds; l < d.mipmapLevelCount + ds; l++) {
@@ -1543,6 +1577,10 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
         if (!d) return nil;
         mt = [g_dev newTextureWithDescriptor:d];
         if (!mt) { RED_ONCE(2, "MTLTexture creation failed %ux%u format=%#x target=%d", t->d.width, t->d.height, t->d.format, t->d.target); return nil; }
+        { size_t pb_ = mtl_pf_bytes(mt.pixelFormat); if (!pb_) pb_ = 4;   // estimate: depth / compressed formats counted as 4 bytes per texel
+          uint64_t est_ = (uint64_t)mt.width * mt.height * MAX(mt.depth, (NSUInteger)1) * MAX(mt.arrayLength, (NSUInteger)1) * MAX(mt.sampleCount, (NSUInteger)1) * pb_;
+          if (mt.mipmapLevelCount > 1) est_ += est_ / 3;
+          ab_note(AB_PLAIN_TEX, est_, (uint32_t)mt.width, (uint32_t)mt.height, (uint32_t)mt.pixelFormat); }
         res_add(mt); tex_zero_fill(mt);   // 先登记驻留再清零（拷贝目标也要驻留） | register residency before zeroing (the copy destination must be resident too)
     }
     if (g_allocprof > 0) { static int n; if (n++ < 30 || n % 500 == 0) MLOG("new texture (%s) #%d serial=%llu %ux%ux%u format=%#x target=%d levels=%u storage=%p", __func__, n, (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, t->d.target, t->d.levels, (void *)t->mem); }
