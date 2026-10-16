@@ -8899,7 +8899,7 @@ index 9c44103..43745d0 100644
      front_run(guest_main);
      return 0;
 diff --git a/dm/host/memstat.m b/dm/host/memstat.m
-index fae2ccc..2bff065 100644
+index fae2ccc..fbb85c2 100644
 --- a/dm/host/memstat.m
 +++ b/dm/host/memstat.m
 @@ -50,7 +50,7 @@ static int classify(vm_address_t a, const vm_region_submap_info_data_64_t *in) {
@@ -8925,7 +8925,29 @@ index fae2ccc..2bff065 100644
      id<MTLDevice> dev = MTLCreateSystemDefaultDevice();   // 与图形后端同一设备对象（系统缺省设备单例） | The same device object as the graphics backend (the system default device singleton)
      uint64_t t0 = now_ns();
      const char *ds = getenv("DM_MEMSTAT_DUMP"); int dump_at = ds ? atoi(ds) : -1;
-@@ -133,7 +133,7 @@ __attribute__((constructor)) static void memstat_start(void) {
+@@ -112,15 +112,20 @@ static void *memstat_thread(void *p) {
+     return NULL;
+ }
+ 
+-__attribute__((constructor)) static void memstat_start(void) {
++// iOS 的 env.txt 在 main 之后才生效：构造函数此时还看不到 DM_MEMSTAT，所以启动入口公开，读完 env.txt 后再调用一次（只启动一次）
++// On iOS env.txt is applied after main: the constructor cannot see DM_MEMSTAT yet, so the entry point is public and called once more after env.txt is read (it starts only once)
++void memstat_start_late(void) {
++    static int started; if (started) return;
+     const char *p = getenv("DM_MEMSTAT");
+     if (!p || !*p) return;
++    started = 1;
+     char *path = strdup(p);
+ #if TARGET_OS_IPHONE
+     if (*p != '/') { size_t n = strlen(getenv("HOME")) + strlen(p) + 16; path = malloc(n); snprintf(path, n, "%s/Documents/%s", getenv("HOME"), p); }   // 相对名 → 容器 Documents（启动前不知容器路径） | Relative name → the container's Documents (the container path is not known before launch)
+ #endif
+     pthread_t th; pthread_create(&th, NULL, memstat_thread, path); pthread_detach(th);
+ }
++__attribute__((constructor)) static void memstat_start(void) { memstat_start_late(); }
+ 
+ // ---------- 按线程 CPU：DM_THRCPU=<tsv 路径>[,间隔秒（缺省 10）]（Mac / iOS 通用；iOS 相对名 → 容器 Documents）----------
+ // 每个间隔遍历本进程全部线程（task_threads），THREAD_EXTENDED_INFO 取线程名与用户 + 系统 CPU 时间（ns），按线程号差分：
+@@ -133,7 +138,7 @@ __attribute__((constructor)) static void memstat_start(void) {
  static void *thrcpu_thread(void *p) {
      char path[1024]; int iv = 10; { const char *c = strchr((const char *)p, ','); snprintf(path, sizeof path, "%.*s", c ? (int)(c - (const char *)p) : (int)strlen(p), (const char *)p); if (c) iv = atoi(c + 1); }
      FILE *f = fopen(path, "w"); if (!f) return NULL;
@@ -8934,7 +8956,7 @@ index fae2ccc..2bff065 100644
      static uint64_t ids[THR_MAX], last[THR_MAX]; int n = 0; uint64_t t0 = now_ns(), tl = t0;
      for (;;) {
          sleep(iv); uint64_t t = now_ns(); double dt = (t - tl) / 1e9, tot = 0; tl = t;
-@@ -153,7 +153,7 @@ static void *thrcpu_thread(void *p) {
+@@ -153,7 +158,7 @@ static void *thrcpu_thread(void *p) {
              mach_port_deallocate(mach_task_self(), th[i]);
          }
          vm_deallocate(mach_task_self(), (vm_address_t)th, nt * sizeof *th);
@@ -9431,7 +9453,7 @@ index 9555b92..fae319c 100644
  
  // 场景生命周期（main.m 的 SceneDelegate 调）：0 失活 1 进后台 2 回前台 3 激活。进后台时冻结客体时钟、等在途 GPU 完成后挂起（后台提交 GPU 会被系统杀）
 diff --git a/dm/ios/Sources/main.m b/dm/ios/Sources/main.m
-index deaf00d..d529007 100644
+index deaf00d..b451601 100644
 --- a/dm/ios/Sources/main.m
 +++ b/dm/ios/Sources/main.m
 @@ -4,7 +4,11 @@
@@ -9446,13 +9468,14 @@ index deaf00d..d529007 100644
  #include <stdio.h>
  #include <unistd.h>
  #include "game_profile.h"   // 游戏档案常数（RomFS 认定路径） | game profile constants (the RomFS marker path)
-@@ -15,6 +19,61 @@ UIViewController *front_ios_root(void);
+@@ -15,6 +19,62 @@ UIViewController *front_ios_root(void);
  void front_ios_focus_event(int ev);
  
  static char *g_argv[4]; static int g_argc;
 +static _Atomic int g_diag_active;
 +uint64_t dm_mtl_diag_frame_sample(void);
 +void crash_sample_threads(const char *why);
++void memstat_start_late(void);
 +static uint64_t boot_monotonic_ns(void) {
 +    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
 +    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
@@ -9508,7 +9531,7 @@ index deaf00d..d529007 100644
  
  static NSString *romfs_locate(void) {
      NSFileManager *fm = NSFileManager.defaultManager;
-@@ -44,12 +103,12 @@ static int boot_env(void) {
+@@ -44,12 +104,13 @@ static int boot_env(void) {
              NSString *ln = [raw stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet]; NSRange eq = [ln rangeOfString:@"="];
              if (!ln.length || [ln hasPrefix:@"#"] || eq.location == NSNotFound || !eq.location) continue;
              NSString *k = [ln substringToIndex:eq.location], *v = [ln substringFromIndex:eq.location + 1];
@@ -9516,6 +9539,7 @@ index deaf00d..d529007 100644
 +            if (!getenv(k.UTF8String)) { setenv(k.UTF8String, v.UTF8String, 0); fprintf(stderr, "boot: environment %s=%s (%s)\n", k.UTF8String, v.UTF8String, ef.lastPathComponent.UTF8String); }
          }
      }
++    memstat_start_late();   // env.txt 已生效，DM_MEMSTAT 此时才可见 | env.txt is applied, so DM_MEMSTAT is visible only now
      NSString *romfs = romfs_locate();
 -    if (!romfs) { fprintf(stderr, "boot: 没找到游戏文件（<App>/romfs 或 Documents/romfs）\n"); return 0; }
 -    fprintf(stderr, "boot: 游戏文件 %s\n", romfs.fileSystemRepresentation);
@@ -9524,7 +9548,7 @@ index deaf00d..d529007 100644
      setenv("DM_ROMFS", romfs.fileSystemRepresentation, 0);
      setenv("DM_SAVE", [doc stringByAppendingPathComponent:@"save"].fileSystemRepresentation, 0);
      setenv("DM_TEMP", [doc stringByAppendingPathComponent:@"temp"].fileSystemRepresentation, 0);
-@@ -58,23 +117,35 @@ static int boot_env(void) {
+@@ -58,23 +119,35 @@ static int boot_env(void) {
      setenv("DM_MSL_DIR", [res stringByAppendingPathComponent:@"msl"].fileSystemRepresentation, 0);
      setenv("DM_FONT_DIR", [dm stringByAppendingPathComponent:@"font"].fileSystemRepresentation, 0);   // 共享字体替身（standard.ttf / nintendo_ext.ttf）：iOS 上没有 macOS 的字体路径 | Shared-font stand-ins (standard.ttf / nintendo_ext.ttf): iOS lacks the macOS font path
      chdir(doc.fileSystemRepresentation);
@@ -9562,7 +9586,7 @@ index deaf00d..d529007 100644
      pthread_t t; pthread_create(&t, &a, boot_thread, NULL); pthread_detach(t);
  }
  int front_ios_boot_ok(void) { return g_boot_ok; }
-@@ -82,6 +153,16 @@ int front_ios_boot_ok(void) { return g_boot_ok; }
+@@ -82,6 +155,16 @@ int front_ios_boot_ok(void) { return g_boot_ok; }
  @interface App : UIResponder <UIApplicationDelegate>
  @end
  @implementation App
@@ -9579,7 +9603,7 @@ index deaf00d..d529007 100644
  - (UISceneConfiguration *)application:(UIApplication *)a configurationForConnectingSceneSession:(UISceneSession *)s options:(UISceneConnectionOptions *)o {
      return [[UISceneConfiguration alloc] initWithName:@"Default" sessionRole:s.role];
  }
-@@ -97,13 +178,13 @@ int front_ios_boot_ok(void) { return g_boot_ok; }
+@@ -97,13 +180,13 @@ int front_ios_boot_ok(void) { return g_boot_ok; }
      self.window.rootViewController = front_ios_root();
      [self.window makeKeyAndVisible];
  }
