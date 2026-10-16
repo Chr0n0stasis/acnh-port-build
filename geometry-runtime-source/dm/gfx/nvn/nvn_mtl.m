@@ -992,6 +992,20 @@ static int no_bc(void) {
     return v;
 }
 static int bc_unpack(uint32_t nvn_fmt, uint32_t *pf, int *bpp) { return no_bc() && nvn_bc_unpacked(nvn_fmt, pf, bpp); }
+// Memory squeeze: sample-only pre-tiled 2D textures are created without their top mip levels (DM_TEX_MAXDIM caps the largest edge, default 512; 0 disables).
+// Level l of the guest texture is level l-drop on the Metal texture; views and uploads shift accordingly. Always keeps at least 2 levels.
+static int tex_maxdim(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_TEX_MAXDIM"); v = e && *e ? atoi(e) : 512; if (v < 0) v = 0; } return v; }
+static int tex_cpu_written(uint64_t serial);
+static int tex_drop(const tex_t *t) {
+    if (!t || !t->mem || !(t->has_layout || tex_cpu_written(t->serial))) return 0;   // 只有预排布 / CPU 写过的贴图走 pkg_upload，其余保持原样 | only packaged / CPU-written textures go through pkg_upload; the rest stay untouched
+    int cap = tex_maxdim();
+    if (cap <= 0 || t->d.target != NVN_TEXTURE_TARGET_2D || t->d.samples > 1 || t->d.levels < 3) return 0;
+    if (t->d.flags & NVN_TEXTURE_FLAGS_IMAGE) return 0;
+    uint32_t m = MAX(t->d.width, t->d.height); int s = 0;
+    while ((m >> s) > (uint32_t)cap && s < (int)t->d.levels - 2) s++;
+    return s;
+}
+static uint64_t g_drop_tex, g_drop_bytes;
 static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {
     uint32_t pf = 0; uint8_t swz[4];
     if (!nvn_fmt_to_mtl(t->d.format, &pf, swz) || !pf) { RED_ONCE(0, "texture format %#x has no Metal mapping (first occurrence)", t->d.format); return nil; }
@@ -1002,6 +1016,7 @@ static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {
     d.pixelFormat = (MTLPixelFormat)pf;
     d.width = t->d.width ? t->d.width : 1; d.height = t->d.height ? t->d.height : 1; d.depth = 1; d.arrayLength = 1;
     d.mipmapLevelCount = t->d.levels ? t->d.levels : 1;
+    if (packaged) { int ds_ = tex_drop(t); if (ds_) { d.width = MAX(d.width >> ds_, 1u); d.height = MAX(d.height >> ds_, 1u); d.mipmapLevelCount -= ds_; } }
     switch (t->d.target) {
         case 0: d.textureType = MTLTextureType1D; d.height = 1; break;
         case 2: d.textureType = MTLTextureType3D; d.depth = t->d.depth; break;
@@ -1282,9 +1297,12 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp) {
     int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
     unsigned layers = (t->d.target == 4 || t->d.target == 9) ? t->d.depth : t->d.target == 8 ? 6 : t->d.target == 3 ? t->d.height : 1;
     if (t->d.target == 9) layers *= 6;
+    int ds = tex_drop(t);   // 丢掉的顶层 mip 数 | number of dropped top mip levels
+    if (ds) { size_t sv = 0; for (int l = 0; l < ds; l++) { uint32_t w = MAX(t->d.width >> l, 1u), h = MAX(t->d.height >> l, 1u); sv += (size_t)((w + bw - 1) / bw) * bpb * ((h + bh - 1) / bh) * layers; }
+        g_drop_bytes += sv; if (!(g_drop_tex++ % 100)) MLOG("texture squeeze: dropped %d top mip(s) of %ux%u format=%#x; textures=%llu, guest-format bytes saved=%llu MB", ds, t->d.width, t->d.height, t->d.format, (unsigned long long)g_drop_tex, (unsigned long long)(g_drop_bytes >> 20)); }
     uint32_t upf; int ubpp = 0, unp = bc_unpack(t->d.format, &upf, &ubpp);   // 无 BC：解排布后在 CPU 上解压，暂存区按解压后的大小 | No BC: decompress on the CPU after deswizzling, with the staging area sized for the decompressed data
     size_t total = 0;
-    for (unsigned l = 0; l < d.mipmapLevelCount; l++) {
+    for (unsigned l = ds; l < d.mipmapLevelCount + ds; l++) {
         uint32_t w = MAX(t->d.width >> l, 1u), h = MAX(t->d.height >> l, 1u), z = t->d.target == 2 ? MAX(t->d.depth >> l, 1u) : 1;
         total += unp ? (size_t)w * ubpp * h * z * layers : (size_t)((w + bw - 1) / bw) * bpb * ((h + bh - 1) / bh) * z * layers;
     }
@@ -1292,7 +1310,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp) {
     void *mb; uint64_t mo;
     int gdec = unp && t->d.target != 2 && bcd_fmt(t->d.format) && bcd_pso();   // 无 BC 的 BC1–5：GPU 解排布 + GPU 解压 | BC1–5 without BC: GPU deswizzle + GPU decompression
     size_t ctotal = 0;   // 压缩块的暂存大小（GPU 解压时暂存区放的是压缩块） | Staging size of the compressed blocks (with GPU decompression the staging area holds compressed blocks)
-    if (gdec) for (unsigned l = 0; l < d.mipmapLevelCount; l++) { uint32_t w = MAX(t->d.width >> l, 1u), h = MAX(t->d.height >> l, 1u); ctotal += (size_t)((w + bw - 1) / bw) * bpb * ((h + bh - 1) / bh) * layers; }
+    if (gdec) for (unsigned l = ds; l < d.mipmapLevelCount + ds; l++) { uint32_t w = MAX(t->d.width >> l, 1u), h = MAX(t->d.height >> l, 1u); ctotal += (size_t)((w + bw - 1) / bw) * bpb * ((h + bh - 1) / bh) * layers; }
     int use_gpu = (!unp || gdec) && g_nvn_deswz_gpu && mtl_addr((uint64_t)t->mem, t->L.size, &mb, &mo);
     if (g_nvn_deswz_gpu && !use_gpu && !unp) RED_ONCE(40, "pre-tiled texture storage outside memory pools; use CPU fallback");
     if (use_gpu) {
@@ -1302,7 +1320,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp) {
         size_t stg_off;
         id<MTLBuffer> stg = up_alloc(gdec ? ctotal : total ? total : 16, &stg_off);
         size_t off = 0; int enc_ok = g_up_ce != nil, nb0 = g_nup_blits, nd0 = g_nup_decs;
-        for (unsigned l = 0; enc_ok && l < d.mipmapLevelCount; l++) {
+        for (unsigned l = ds; enc_ok && l < d.mipmapLevelCount + ds; l++) {
             uint32_t w = MAX(t->d.width >> l, 1u), h = MAX(t->d.height >> l, 1u), z = t->d.target == 2 ? MAX(t->d.depth >> l, 1u) : 1;
             size_t pitch = (size_t)((w + bw - 1) / bw) * bpb, rows = (h + bh - 1) / bh;
             for (unsigned y = 0; y < layers; y++) {
@@ -1310,14 +1328,14 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp) {
                 if (nvn_deswz_gpu_encode_m4(g_up_ce, g_up_ct, params, poff, (__bridge id<MTLBuffer>)mb, mo, &t->d, l, y, stg, stg_off + off, pitch)) { enc_ok = 0; break; }
                 if (gdec) {   // 解压任务：冲刷时过了屏障再派发（见 up_flush） | Decompression job: dispatched at flush time after the barrier (see up_flush)
                     MTLPixelFormat vf = mt.pixelFormat == MTLPixelFormatRGBA8Unorm_sRGB ? MTLPixelFormatRGBA8Unorm : mt.pixelFormat;
-                    id<MTLTexture> v = [mt newTextureViewWithPixelFormat:vf textureType:MTLTextureType2D levels:NSMakeRange(l, 1) slices:NSMakeRange(y, 1)];
+                    id<MTLTexture> v = [mt newTextureViewWithPixelFormat:vf textureType:MTLTextureType2D levels:NSMakeRange(l - ds, 1) slices:NSMakeRange(y, 1)];
                     size_t qoff; id<MTLBuffer> q = up_param_alloc(&qoff);
                     if (!v || !q) { enc_ok = 0; break; }
                     uint32_t *pp = (uint32_t *)((uint8_t *)q.contents + qoff); pp[0] = (uint32_t)(stg_off + off); pp[1] = (uint32_t)pitch; pp[2] = w; pp[3] = h; pp[4] = (uint32_t)bcd_fmt(t->d.format);
                     if (g_nup_decs == g_up_deccap) { g_up_deccap = g_up_deccap ? g_up_deccap * 2 : 256; g_up_decs = realloc(g_up_decs, g_up_deccap * sizeof *g_up_decs); }
                     g_up_decs[g_nup_decs++] = (up_dec){stg, q, 0, qoff, (w + 3) / 4, (h + 3) / 4, v}; [g_up_texs addObject:v]; defer_obj_unref(v);   // 视图：本次提交跑完再放，不撤驻留（驻留的是底图） | View: released after this submission finishes running, residency not revoked (what is resident is the base texture)
                 } else
-                up_blit_add(stg, stg_off + off, pitch, pitch * rows, MTLSizeMake(w, h, z), mt, y, l);
+                up_blit_add(stg, stg_off + off, pitch, pitch * rows, MTLSizeMake(w, h, z), mt, y, l - ds);
                 off += pitch * rows * z;
             }
         }
@@ -1335,7 +1353,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp) {
     id<MTLBuffer> stg = [g_dev newBufferWithLength:total ? total : 16 options:MTLResourceStorageModeShared];
     res_add(stg); [g_up_keep addObject:stg];
     size_t off = 0;
-    for (unsigned l = 0; l < d.mipmapLevelCount; l++) {
+    for (unsigned l = ds; l < d.mipmapLevelCount + ds; l++) {
         uint32_t w = MAX(t->d.width >> l, 1u), h = MAX(t->d.height >> l, 1u), z = t->d.target == 2 ? MAX(t->d.depth >> l, 1u) : 1;
         size_t pitch = (size_t)((w + bw - 1) / bw) * bpb, rows = (h + bh - 1) / bh;
         for (unsigned y = 0; y < layers; y++) {
@@ -1344,12 +1362,12 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp) {
                 if (!cb || nvn_deswizzle(&t->d, l, y, t->mem, cb, pitch)) { free(cb); RED_ONCE(9, "unswizzle failed format=%#x target=%d", t->d.format, t->d.target); break; }
                 for (uint32_t zi = 0; zi < z; zi++) nvn_bc_decode(t->d.format, cb + zi * pitch * rows, pitch, w, h, (uint8_t *)stg.contents + off + zi * up * h, up);
                 free(cb);
-                up_blit_add(stg, off, up, up * h, MTLSizeMake(w, h, z), mt, y, l);
+                up_blit_add(stg, off, up, up * h, MTLSizeMake(w, h, z), mt, y, l - ds);
                 off += up * h * z;
                 continue;
             }
             if (nvn_deswizzle(&t->d, l, y, t->mem, (uint8_t *)stg.contents + off, pitch)) { RED_ONCE(9, "unswizzle failed format=%#x target=%d", t->d.format, t->d.target); break; }
-            up_blit_add(stg, off, pitch, pitch * rows, MTLSizeMake(w, h, z), mt, y, l);
+            up_blit_add(stg, off, pitch, pitch * rows, MTLSizeMake(w, h, z), mt, y, l - ds);
             off += pitch * rows * z;
         }
     }
@@ -2613,6 +2631,9 @@ static id<MTLTexture> tex_by_id(int tid) {   // 调用方持 g_rmu | Caller hold
             sg = g_ser_gen;
         }
         NSUInteger l0 = r.v.set_levels ? r.v.base_level : 0, nl = r.v.set_levels && r.v.nlevels ? r.v.nlevels : base.mipmapLevelCount - l0;
+        { int sh = (base.textureType == MTLTextureType2D && rp->t.d.levels > base.mipmapLevelCount) ? (int)(rp->t.d.levels - base.mipmapLevelCount) : 0;   // 顶层 mip 已丢：层级整体前移 | top mips dropped: shift the level range down
+          if (sh && r.v.set_levels) { long e = (long)l0 + (long)nl - sh; l0 = l0 > (NSUInteger)sh ? l0 - sh : 0; if (e <= (long)l0) e = (long)l0 + 1; if (e > (long)base.mipmapLevelCount) e = base.mipmapLevelCount; nl = (NSUInteger)(e - (long)l0); if (!nl) { l0 = base.mipmapLevelCount - 1; nl = 1; } }
+          else if (sh) { l0 = 0; nl = base.mipmapLevelCount; } }
         NSUInteger s0 = r.v.set_layers ? r.v.min_layer : 0;
         NSUInteger ns = base.textureType == MTLTextureType3D ? 1 : (r.v.set_layers && r.v.nlayers ? r.v.nlayers : base.arrayLength * (base.textureType == MTLTextureTypeCube || base.textureType == MTLTextureTypeCubeArray ? 6 : 1) - s0);
         MTLTextureType tt = r.v.set_target ? ttype(r.v.target, base.textureType) : base.textureType;
@@ -5268,6 +5289,8 @@ static void copy_t2t(const p_copy_t2t *c) {
     PD("T src=%llu dst=%llu %dx%dx%d→%dx%dx%d flags=%#x", c->src->serial, c->dst->serial, c->sr.width, c->sr.height, c->sr.depth, c->dr.width, c->dr.height, c->dr.depth, c->flags);
     if (!s || !d) return;
     unsigned sl = c->has_sv && c->sv.set_levels ? c->sv.base_level : 0, dl = c->has_dv && c->dv.set_levels ? c->dv.base_level : 0;
+    { unsigned sdr = (unsigned)tex_drop(c->src), ddr = (unsigned)tex_drop(c->dst);   // 被丢顶层 mip 的贴图：客体层级号整体前移，落在已丢层级上的拷贝跳过 | textures with dropped top mips: shift guest level numbers; copies touching a dropped level are skipped
+      if (sdr || ddr) { if (sl < sdr || dl < ddr) { static int w; if (!w++) MLOG("texture squeeze: skipped copy touching a dropped mip level (src lv%u drop %u, dst lv%u drop %u)", sl, sdr, dl, ddr); return; } sl -= sdr; dl -= ddr; } }
     unsigned sz0 = c->has_sv && c->sv.set_layers ? c->sv.min_layer : 0, dz0 = c->has_dv && c->dv.set_layers ? c->dv.min_layer : 0;
     if (c->flags & DM_COPY_RESOLVE) {   // Downsample：多重采样解析进单采样目标（深度取 0 号样本）；两边采样数相同时就是普通整张拷贝 | Downsample: multisample resolve into the single-sample destination (depth takes sample 0); with equal sample counts it is a plain whole copy
         if (s.sampleCount == d.sampleCount && s.pixelFormat == d.pixelFormat && s.width == d.width && s.height == d.height) {
