@@ -26,7 +26,7 @@ def unfilled(reads, ranges):
     result = []
     for bank, entry in reads.items():
         if entry['dynamic']:
-            result.append(f'c{bank} 动态下标')
+            result.append(f'c{bank} dynamic index')
         for offset in entry['vec4_offsets']:
             # 每行完整 16 字节都要有定义；表间的未初始化空洞不能借相交检查蒙混通过。
             # Require the full 16-byte row to be defined; overlap cannot hide uninitialized gaps.

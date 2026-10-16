@@ -1,9 +1,9 @@
 // 大输出独立分配，小参数使用现有竞技场；所有资源跟随本次 GPU 提交延后回收。
 // Allocate large outputs separately and use the existing arena for small parameters; retire resources after this GPU submission.
 static id<MTLBuffer> geometry_buffer(uint64_t bytes) {
-    if(!bytes || bytes>g_dev.maxBufferLength) MDIE("【红】几何缓冲长度无效：%llu",(unsigned long long)bytes);
+    if(!bytes || bytes>g_dev.maxBufferLength) MDIE("[ERROR] invalid geometry buffer size: %llu",(unsigned long long)bytes);
     id<MTLBuffer> b=[g_dev newBufferWithLength:(NSUInteger)bytes options:MTLResourceStorageModeShared];
-    if(!b) MDIE("【红】几何缓冲分配失败：%llu",(unsigned long long)bytes);
+    if(!b) MDIE("[ERROR] geometry buffer allocation failed: %llu",(unsigned long long)bytes);
     res_add(b);defer_obj_release(b);return b;
 }
 static uint64_t geometry_data(const void *data,size_t size) {
@@ -12,7 +12,7 @@ static uint64_t geometry_data(const void *data,size_t size) {
 static id<MTLTexture> geometry_texture(id<MTLBuffer> buffer) {
     MTLTextureDescriptor *d=[MTLTextureDescriptor textureBufferDescriptorWithPixelFormat:MTLPixelFormatR32Float width:buffer.length/4 resourceOptions:MTLResourceStorageModeShared usage:MTLTextureUsageShaderRead];
     id<MTLTexture> t=[buffer newTextureWithDescriptor:d offset:0 bytesPerRow:buffer.length];
-    if(!t) MDIE("【红】几何缓冲贴图创建失败");defer_obj_unref(t);return t;
+    if(!t) MDIE("[ERROR] geometry buffer texture creation failed");defer_obj_unref(t);return t;
 }
 static void geometry_prepare(NSString *name,nvn_geo_params p,const uint64_t *buffers,unsigned n,uint32_t count) {
     static NSMutableDictionary<NSString *,id<MTLComputePipelineState>> *pipelines;
@@ -20,11 +20,11 @@ static void geometry_prepare(NSString *name,nvn_geo_params p,const uint64_t *buf
     if(!pipelines) pipelines=[NSMutableDictionary dictionary];
     NSError *error=nil;
     if(!library) library=[g_dev newLibraryWithSource:@(k_nvn_geometry_fetch_msl) options:nil error:&error];
-    if(!library) MDIE("【红】几何准备内核编译失败：%s",error.localizedDescription.UTF8String);
+    if(!library) MDIE("[ERROR] geometry preparation kernel compilation failed: %s",error.localizedDescription.UTF8String);
     id<MTLComputePipelineState> ps=pipelines[name];
     if(!ps) {
         id<MTLFunction> fn=[library newFunctionWithName:name];ps=[g_dev newComputePipelineStateWithFunction:fn error:&error];
-        if(!ps) MDIE("【红】几何准备管线失败：%s",name.UTF8String);pipelines[name]=ps;
+        if(!ps) MDIE("[ERROR] geometry preparation pipeline failed: %s",name.UTF8String);pipelines[name]=ps;
     }
     id e=enc_c_begin(NULL);enc_c_pso(e,ps);enc_c_args(e,geometry_data(&p,sizeof p),0);
     for(unsigned i=0;i<n;i++) enc_c_args(e,buffers[i],i+1);
@@ -39,13 +39,13 @@ static void geometry_bind(NvGeometry *g,unsigned role,NSDictionary<NSString *,NS
             if([kind isEqual:@"c1"] && role<2) value=g->constants[role].gpuAddress;
             else if([kind isEqual:@"uniform"] && role<2) {
                 unsigned reg=[binding[@"reg"] unsignedIntValue];
-                if(reg>=16) MDIE("【红】几何 uniform 编号越界");
+                if(reg>=16) MDIE("[ERROR] geometry uniform index out of bounds");
                 const p_bind_buf *u=&S.ubo[role==0?0:2][reg];void *mb;uint64_t offset;
-                if(!u->addr || !mtl_gpu_addr(u->addr,1,&mb,&offset,&value)) MDIE("【红】几何 uniform 未绑定：阶段 %u 槽 %u",role,reg);
+                if(!u->addr || !mtl_gpu_addr(u->addr,1,&mb,&offset,&value)) MDIE("[ERROR] geometry uniform unbound: stage=%u slot=%u",role,reg);
                 use_rec("buf",u->addr,u->size,0,NULL);
             } else {
                 NSString *key=[kind isEqual:@"attribute"]?[NSString stringWithFormat:@"attribute%u",[binding[@"location"] unsignedIntValue]]:kind;
-                NSNumber *number=resources[key];if(!number) MDIE("【红】几何参数资源未实现：%s",key.UTF8String);value=number.unsignedLongLongValue;
+                NSNumber *number=resources[key];if(!number) MDIE("[ERROR] geometry argument resource not implemented: %s",key.UTF8String);value=number.unsignedLongLongValue;
             }
             slots[aid]=value;
         }
@@ -57,12 +57,12 @@ static uint64_t g_geometry_draws;
 static void geometry_draw(NvProg *program,const p_draw *dw,const p_draw_idx *di) {
     int32_t count=dw?dw->count:di->count,instances=dw?dw->instances:di->instances;
     if(count<=0 || S.poly.cull==NVN_FACE_FRONT_AND_BACK) return;
-    if(instances<0) MDIE("【红】几何实例数无效");
+    if(instances<0) MDIE("[ERROR] invalid geometry instance count");
     uint32_t nv=count,ni=instances?instances:1,primitive=dw?dw->prim:di->prim;
     NvGeometry *g=program->geometry;nvn_geo_sizes sizes;
     uint32_t vs_words=[g->metadata[@"vertex_stride"] unsignedIntValue],gs_words=[g->metadata[@"geometry_stride"] unsignedIntValue];
     uint32_t maximum=[g->metadata[@"max_output_vertices"] unsignedIntValue];
-    if(!nvn_geo_plan(nv,ni,primitive,vs_words,gs_words,maximum,&sizes)) MDIE("【红】几何绘制类型或容量不支持");
+    if(!nvn_geo_plan(nv,ni,primitive,vs_words,gs_words,maximum,&sizes)) MDIE("[ERROR] geometry draw type or capacity unsupported");
     if(!sizes.primitives) return;
     // 关闭普通绘制的覆盖/合并假设，准备与渲染之间使用 Metal 4 的生产者/消费者屏障。
     // Bypass normal-draw coverage/merge assumptions and use Metal 4 producer/consumer barriers between preparation and rendering.
@@ -74,9 +74,9 @@ static void geometry_draw(NvProg *program,const p_draw *dw,const p_draw_idx *di)
     p.restart_enable=S.restart.enabled;p.restart_index=S.restart.index;
     uint32_t default_attribute[4]={0,0,0,0x3f800000};uint64_t default_gpu=geometry_data(default_attribute,sizeof default_attribute),source_gpu=default_gpu;
     if(di) {
-        if(di->itype<0 || di->itype>2) MDIE("【红】几何索引类型无效");
+        if(di->itype<0 || di->itype>2) MDIE("[ERROR] invalid geometry index type");
         p.index_bytes=1u<<di->itype;uint64_t bytes=(uint64_t)nv*p.index_bytes;void *mb;uint64_t offset;
-        if(bytes>UINT32_MAX || !mtl_gpu_addr(di->ibuf,bytes,&mb,&offset,&source_gpu)) MDIE("【红】几何索引范围不在内存池内");
+        if(bytes>UINT32_MAX || !mtl_gpu_addr(di->ibuf,bytes,&mb,&offset,&source_gpu)) MDIE("[ERROR] geometry index range outside memory pools");
         p.source_bytes=(uint32_t)bytes;use_rec("buf",di->ibuf,bytes,0,NULL);
     }
     uint64_t index_args[]={source_gpu,indices.gpuAddress};geometry_prepare(@"geo_indices",p,index_args,2,nv);
@@ -87,13 +87,13 @@ static void geometry_draw(NvProg *program,const p_draw *dw,const p_draw_idx *di)
     NSMutableSet<NSNumber *> *locations=[NSMutableSet set];
     for(NSDictionary *set in g->sets[0])for(NSDictionary *binding in set[@"bindings"])if([binding[@"kind"] isEqual:@"attribute"]) [locations addObject:binding[@"location"]];
     for(NSNumber *location in locations) {
-        unsigned a=location.unsignedIntValue;if(a>=16) MDIE("【红】几何顶点属性编号越界");
+        unsigned a=location.unsignedIntValue;if(a>=16) MDIE("[ERROR] geometry vertex attribute index out of bounds");
         id<MTLBuffer> expanded=geometry_buffer((uint64_t)nv*ni*16);nvn_geo_params fetch=p;fetch.count=nv*ni;
         uint64_t raw=default_gpu;fetch.format=0x2e;fetch.stride=0;fetch.source_bytes=16;fetch.attribute_offset=0;
         if(a<(unsigned)S.nattr && S.attr[a].fmt) {
-            va_st at=S.attr[a];if(at.stream>=16 || !nvn_geo_format_bytes(at.fmt)) MDIE("【红】几何顶点格式或流不支持");
+            va_st at=S.attr[a];if(at.stream>=16 || !nvn_geo_format_bytes(at.fmt)) MDIE("[ERROR] geometry vertex format or stream unsupported");
             const NVNbufferRange *range=&S.vbuf[at.stream];void *mb;uint64_t offset;
-            if(!range->address || !mtl_gpu_addr(range->address,1,&mb,&offset,&raw)) MDIE("【红】几何顶点缓冲未绑定");
+            if(!range->address || !mtl_gpu_addr(range->address,1,&mb,&offset,&raw)) MDIE("[ERROR] geometry vertex buffer unbound");
             uint64_t bytes=MIN(range->size,((__bridge id<MTLBuffer>)mb).length-offset);
             fetch.source_bytes=(uint32_t)MIN(bytes,UINT32_MAX);fetch.format=at.fmt;fetch.attribute_offset=at.offset;
             fetch.stride=S.stream[at.stream].stride;fetch.divisor=S.stream[at.stream].divisor;use_rec("buf",range->address,range->size,0,NULL);
@@ -107,7 +107,7 @@ static void geometry_draw(NvProg *program,const p_draw *dw,const p_draw_idx *di)
     uint64_t init_args[]={emitted.gpuAddress};geometry_prepare(@"geo_initialize_indices",p,init_args,1,sizes.index_words);
     for(unsigned role=0;role<2;role++) {
         id e=enc_c_begin(NULL);enc_c_pso(e,g->compute[role]);geometry_bind(g,role,resources,e);
-        if(g->compute[role].maxTotalThreadsPerThreadgroup<32) MDIE("【红】几何计算线程组不支持");
+        if(g->compute[role].maxTotalThreadsPerThreadgroup<32) MDIE("[ERROR] geometry compute workgroup unsupported");
         unsigned x=role?sizes.primitives:nv;enc_c_dispatch(e,MTLSizeMake((x+7)/8,(ni+3)/4,1),MTLSizeMake(8,4,1));enc_c_end(e);
     }
     uint64_t mask_args[]={valid.gpuAddress,emitted.gpuAddress};geometry_prepare(@"geo_mask_indices",p,mask_args,2,sizes.index_words);
@@ -130,7 +130,7 @@ static void geometry_draw(NvProg *program,const p_draw *dw,const p_draw_idx *di)
     geometry_bind(g,2,resources,en);if(program->sh[1])encode_args(en,program->sh[1],1,0);
     if(g_vis_counting && g_enc_has_vis) {
         if(g_vis_cur<0 || g_vis_cur_pass!=g_pass.serial) {
-            if(g_vis_n>=VIS_SLOTS) MDIE("【红】几何可见性槽用尽");g_vis_cur=(int)g_vis_n++;g_vis_cur_pass=g_pass.serial;
+            if(g_vis_n>=VIS_SLOTS) MDIE("[ERROR] geometry visibility slots exhausted");g_vis_cur=(int)g_vis_n++;g_vis_cur_pass=g_pass.serial;
             if(g_nvs==g_vscap){g_vscap=g_vscap?g_vscap*2:64;g_vs=realloc(g_vs,g_vscap*sizeof *g_vs);}
             g_vs[g_nvs++]=(vis_slot){(void*)CFBridgingRetain(g_vis),(uint32_t)g_vis_cur};
         }
@@ -139,5 +139,5 @@ static void geometry_draw(NvProg *program,const p_draw *dw,const p_draw_idx *di)
     g_pass.range_external=1;rt_range_note_depth();udc_note_draw(program);
     enc_r_draw_indexed(en,MTLPrimitiveTypeTriangleStrip,sizes.index_words,MTLIndexTypeUInt32,emitted.gpuAddress,emitted.length,1,0,0);
     g_stat_draw++;g_geometry_draws++;g_pso_dirty=g_dss_dirty=1;args_dirty_all();
-    if(g_geometry_draws==1) MLOG("几何计算绘制首例：顶点 %u、图元 %u、实例 %u",nv,sizes.primitives,ni);
+    if(g_geometry_draws==1) MLOG("first geometry compute draw: vertices=%u primitives=%u instances=%u",nv,sizes.primitives,ni);
 }

@@ -11,23 +11,23 @@
 enum { BCAT_NOT_FOUND=0x47a, BCAT_ALREADY_MOUNTED=0x87a, BCAT_NOT_MOUNTED=0xa7a, BCAT_NO_INTERNET=0x107a };
 static _Atomic int g_bcat_mounted;
 
-HLE_FORCE("_ZN2nn4bcat10InitializeEv", "BCAT 初始化：宿主提供离线空缓存，不连接 Switch 分发服务", void, h_bcat_Init, void) {
-    LOG("bcat：离线空缓存已初始化");
+HLE_FORCE("_ZN2nn4bcat10InitializeEv", "BCAT initialization: empty offline cache, no Switch delivery service", void, h_bcat_Init, void) {
+    LOG("bcat: empty offline cache initialized");
 }
-HLE_FORCE("_ZN2nn4bcat25MountDeliveryCacheStorageEv", "挂载离线分发缓存：有效空缓存，保留已挂载状态", Result, h_bcat_Mount, void) {
+HLE_FORCE("_ZN2nn4bcat25MountDeliveryCacheStorageEv", "Mount offline delivery cache: valid empty cache, track mount state", Result, h_bcat_Mount, void) {
     return atomic_exchange(&g_bcat_mounted,1) ? BCAT_ALREADY_MOUNTED : RES_OK;
 }
-HLE_FORCE("_ZN2nn4bcat27UnmountDeliveryCacheStorageEv", "卸载离线分发缓存：释放挂载状态", Result, h_bcat_Unmount, void) {
+HLE_FORCE("_ZN2nn4bcat27UnmountDeliveryCacheStorageEv", "Unmount offline delivery cache: release mount state", Result, h_bcat_Unmount, void) {
     return atomic_exchange(&g_bcat_mounted,0) ? RES_OK : BCAT_NOT_MOUNTED;
 }
-HLE_FORCE("_ZN2nn4bcat22DeliveryCacheDirectory4OpenERKNS0_13DirectoryNameE", "打开分发目录：空缓存中不存在，不制造服务对象", Result, h_bcat_DirOpen, void *self, const void *name) {
+HLE_FORCE("_ZN2nn4bcat22DeliveryCacheDirectory4OpenERKNS0_13DirectoryNameE", "Open delivery directory: absent in empty cache, no service object", Result, h_bcat_DirOpen, void *self, const void *name) {
     (void)self; (void)name;
     return atomic_load(&g_bcat_mounted) ? BCAT_NOT_FOUND : BCAT_NOT_MOUNTED;
 }
-HLE_FORCE("_ZN2nn4bcat17DeliveryCacheFile4OpenERKNS0_13DirectoryNameERKNS0_8FileNameE", "打开分发文件：空缓存中不存在，不制造服务对象", Result, h_bcat_FileOpen, void *self, const void *directory, const void *file) {
+HLE_FORCE("_ZN2nn4bcat17DeliveryCacheFile4OpenERKNS0_13DirectoryNameERKNS0_8FileNameE", "Open delivery file: absent in empty cache, no service object", Result, h_bcat_FileOpen, void *self, const void *directory, const void *file) {
     (void)self; (void)directory; (void)file;
     return atomic_load(&g_bcat_mounted) ? BCAT_NOT_FOUND : BCAT_NOT_MOUNTED;
 }
-HLE_FORCE("_ZN2nn4bcat24RequestSyncDeliveryCacheEPNS0_21DeliveryCacheProgressE", "分发同步：返回 SDK 自身的网络请求未获准结果，不附加异步服务", Result, h_bcat_Sync, void *progress) {
+HLE_FORCE("_ZN2nn4bcat24RequestSyncDeliveryCacheEPNS0_21DeliveryCacheProgressE", "Delivery sync: SDK network-request-not-permitted result, no async service", Result, h_bcat_Sync, void *progress) {
     (void)progress; return BCAT_NO_INTERNET;
 }

@@ -35,7 +35,7 @@ static Result quota_load(device_quota *out) {
     if (!stream) { if (errno == ENOENT) { *out = q; return RES_OK; } return RES_FAIL; }
     int ok = fread(&q, sizeof q, 1, stream) == 1 && fgetc(stream) == EOF && !ferror(stream);
     if (fclose(stream)) ok = 0;
-    if (!ok || !quota_valid(&q)) { LOG("【红】设备存档容量记录损坏或属于其他程序：%s", path); return RES_FAIL; }
+    if (!ok || !quota_valid(&q)) { LOG("[ERROR] device save capacity record corrupt or belongs to another program: %s", path); return RES_FAIL; }
     *out = q; return RES_OK;
 }
 
@@ -57,14 +57,14 @@ static Result quota_store(const device_quota *q) {
     return ok ? RES_OK : RES_FAIL;
 }
 
-HLE_FORCE("_ZN2nn2fs21GetDeviceSaveDataSizeEPlS1_", "fsp-srv；设备存档逻辑容量由 NACP 起始值及持久记录给出", Result, h_fs_DevGetSize, int64_t *data, int64_t *journal) {
+HLE_FORCE("_ZN2nn2fs21GetDeviceSaveDataSizeEPlS1_", "fsp-srv: logical device-save capacity from NACP initial values and persistent record", Result, h_fs_DevGetSize, int64_t *data, int64_t *journal) {
     if (!data || !journal) return RES_FAIL;
     pthread_mutex_lock(&g_quota_lock); device_quota q; Result r = quota_load(&q);
     if (r == RES_OK) { *data = q.data; *journal = q.journal; }
     pthread_mutex_unlock(&g_quota_lock); return r;
 }
 
-HLE_FORCE("_ZN2nn2fs20ExtendDeviceSaveDataEll", "fsp-srv；单调扩展逻辑容量，持久化失败不发布新值", Result, h_fs_DevExtend, int64_t data, int64_t journal) {
+HLE_FORCE("_ZN2nn2fs20ExtendDeviceSaveDataEll", "fsp-srv: monotonically grow logical capacity; publish only after persistence succeeds", Result, h_fs_DevExtend, int64_t data, int64_t journal) {
     pthread_mutex_lock(&g_quota_lock); device_quota old; Result r = quota_load(&old);
     if (r == RES_OK) {
         device_quota next = {QUOTA_MAGIC, DM_GAME_PROGRAM_ID, data, journal};

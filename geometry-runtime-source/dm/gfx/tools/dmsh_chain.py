@@ -64,24 +64,24 @@ def xlate_source_sha():   # 与 dmsh_xlate --source-sha 同口径：嵌入的 Pr
 
 def check_tools():
     want = dict(l.rstrip('\n').split('\t', 1) for l in open(LOCK) if '\t' in l and not l.startswith('#'))
-    now = tools_now(); bad = [f'{k}：锁 {want.get(k)} / 实际 {v}' for k, v in now.items() if want.get(k) != v]
-    if now['xlate_source'] != xlate_source_sha(): bad.append(f'翻译器不是用仓内源编的：嵌入源 {now["xlate_source"]} / 仓内 {xlate_source_sha()}（重编 dmsh_xlate）')
+    now = tools_now(); bad = [f'{k}: locked {want.get(k)} / actual {v}' for k, v in now.items() if want.get(k) != v]
+    if now['xlate_source'] != xlate_source_sha(): bad.append(f'translator does not match repository source: embedded {now["xlate_source"]} / repository {xlate_source_sha()} (rebuild dmsh_xlate)')
     return bad
 
 if __name__ == '__main__':
     a = sys.argv[1:]
     if a == ['--update-lock']:
         t = tools_now()
-        if t['xlate_source'] != xlate_source_sha(): sys.exit(f'【红】翻译器不是用仓内源编的（嵌入 {t["xlate_source"]} / 仓内 {xlate_source_sha()}）：先重编 dmsh_xlate')
+        if t['xlate_source'] != xlate_source_sha(): sys.exit(f'[ERROR] translator source mismatch (embedded {t["xlate_source"]} / repository {xlate_source_sha()}): rebuild dmsh_xlate first')
         open(LOCK, 'w').write('# 翻译链工具指纹（dmsh_chain.py --update-lock 生成；换工具后重生成并随提交入仓）\n' + ''.join(f'{k}\t{v}\n' for k, v in t.items()))
-        print('已写', LOCK)
+        print('Wrote', LOCK)
     elif a == ['--check-tools']:
         bad = check_tools()
-        for b in bad: print('【红】翻译链工具与锁文件不符：' + b)
+        for b in bad: print('[ERROR] translation tools differ from lock: ' + b)
         sys.exit(1 if bad else 0)
     elif a == ['--header']:
         open(HEADER, 'w').write(f'// 生成文件（dm/gfx/tools/dmsh_chain.py --header，游戏 {GAME.id}）：本源码树期望的 B 着色器库翻译链版本（缺省选项）；宿主只加载 <库目录>/b-<V>/\n'
                                 f'#define DMSH_CHAIN "{version()}"\n')
         print(version())
     elif not a: print(version())
-    else: sys.exit(__doc__ if __doc__ else '用法见文件头')
+    else: sys.exit(__doc__ if __doc__ else 'See file header for usage')

@@ -14,7 +14,7 @@ class DriverChecks(unittest.TestCase):
             '0': {'vec4_offsets': [272, 736], 'dynamic': False}})
 
     def test_dynamic_is_not_silently_proven_safe(self):
-        self.assertEqual(unfilled(reads('cp_c0._m0[index];'), {0: [(0, 0xa00)]}), ['c0 动态下标'])
+        self.assertEqual(unfilled(reads('cp_c0._m0[index];'), {0: [(0, 0xa00)]}), ['c0 dynamic index'])
 
     def test_names_and_regular_uniforms_are_not_driver_reads(self):
         self.assertEqual(reads('cp_c3._m0[46]; xcp_c0._m0[46];'), {})

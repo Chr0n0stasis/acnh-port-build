@@ -8,7 +8,7 @@ static NvGeometry *geometry_load(const char *vertex, const char *geometry, const
     if(!cache) cache=[NSMutableDictionary dictionary];
     NvGeometry *g=cache[gs];
     if(g) {
-        if(![g->metadata[@"vs"] isEqual:vs] || ![g->metadata[@"ps"] isEqual:ps]) MDIE("【红】几何程序配对身份不符");
+        if(![g->metadata[@"vs"] isEqual:vs] || ![g->metadata[@"ps"] isEqual:ps]) MDIE("[ERROR] geometry program pair identity mismatch");
         return g;
     }
     NSString *path=[g_msl_dir stringByAppendingPathComponent:[gs stringByAppendingString:@".geometry.json"]];
@@ -18,50 +18,50 @@ static NvGeometry *geometry_load(const char *vertex, const char *geometry, const
        ![m[@"vs"] isEqual:vs] || ![m[@"gs"] isEqual:gs] || ![m[@"ps"] isEqual:ps] ||
        ![m[@"attribute_layout"] isEqual:@"draw-order-float4"] || [m[@"vertex_info_bytes"] intValue]!=1056 ||
        [m[@"vertices_per_primitive"] intValue]!=3 || [m[@"invocations"] intValue]!=1)
-        MDIE("【红】几何元数据缺失、过期或布局不兼容：%s",path.UTF8String);
+        MDIE("[ERROR] geometry metadata missing, stale or layout incompatible: %s",path.UTF8String);
     unsigned maximum=[m[@"max_output_vertices"] unsignedIntValue];
     if(!maximum || maximum%3 || maximum>32 || [m[@"index_stride"] unsignedIntValue]!=maximum+maximum/3)
-        MDIE("【红】几何输出尺寸不兼容：%s",geometry);
+        MDIE("[ERROR] geometry output dimensions incompatible: %s",geometry);
     g=[NvGeometry new];g->metadata=m;
     NSArray *roles=@[@"vertex_compute",@"geometry_compute",@"passthrough_vertex"];
     for(unsigned role=0;role<3;role++) {
         NSDictionary *p=m[@"programs"][roles[role]];
         NSString *library=[NSString stringWithFormat:@"%@_%@.metallib",gs,roles[role]];
         if(![p[@"library"] isEqual:library] || ![p[@"entry"] isEqual:@"main0"] || ![p[@"sets"] isKindOfClass:NSArray.class])
-            MDIE("【红】几何程序库布局不兼容：%s",geometry);
+            MDIE("[ERROR] geometry library layout incompatible: %s",geometry);
         g->sets[role]=p[@"sets"];
         unsigned seen=0;
         for(NSDictionary *set in g->sets[role]) {
             unsigned index=[set[@"index"] unsignedIntValue],words=[set[@"words"] unsignedIntValue];
-            if(index>2 || (seen&(1u<<index)) || !words || words>32) MDIE("【红】几何参数集合越界");
+            if(index>2 || (seen&(1u<<index)) || !words || words>32) MDIE("[ERROR] geometry argument set out of bounds");
             seen|=1u<<index; unsigned ids=0;
             for(NSDictionary *binding in set[@"bindings"]) {
                 unsigned aid=[binding[@"id"] unsignedIntValue];
-                if(aid>=words || (ids&(1u<<aid))) MDIE("【红】几何参数编号越界或重复");
+                if(aid>=words || (ids&(1u<<aid))) MDIE("[ERROR] geometry argument index out of bounds or duplicated");
                 ids|=1u<<aid;
             }
         }
         id<MTLLibrary> lib=lib_from_file([g_msl_dir stringByAppendingPathComponent:library],&error);
         id<MTLFunction> fn=[lib newFunctionWithName:p[@"entry"]];
-        if(!fn) MDIE("【红】几何程序载入失败：%s",library.UTF8String);
+        if(!fn) MDIE("[ERROR] geometry program load failed: %s",library.UTF8String);
         if(role==2) {
             g->passthrough=[NvShader new];g->passthrough->fn=fn;g->passthrough->stage=0;
             snprintf(g->passthrough->key,sizeof g->passthrough->key,"%s_gv",geometry);
         } else {
             g->compute[role]=[g_dev newComputePipelineStateWithFunction:fn error:&error];
-            if(!g->compute[role]) MDIE("【红】几何计算管线创建失败：%s",error.localizedDescription.UTF8String);
+            if(!g->compute[role]) MDIE("[ERROR] geometry compute pipeline creation failed: %s",error.localizedDescription.UTF8String);
             NSString *hex=p[@"c1"];
-            if(![hex isKindOfClass:NSString.class] || (hex.length&1) || hex.length>131072) MDIE("【红】几何 c1 长度无效");
+            if(![hex isKindOfClass:NSString.class] || (hex.length&1) || hex.length>131072) MDIE("[ERROR] invalid geometry c1 length");
             g->constants[role]=[g_dev newBufferWithLength:65536 options:MTLResourceStorageModeShared];
-            if(!g->constants[role]) MDIE("【红】几何 c1 分配失败");
+            if(!g->constants[role]) MDIE("[ERROR] geometry c1 allocation failed");
             memset(g->constants[role].contents,0,65536);
             unsigned char *bytes=g->constants[role].contents;
             for(NSUInteger i=0;i<hex.length/2;i++) {
-                unsigned value=0;if(sscanf([[hex substringWithRange:NSMakeRange(i*2,2)] UTF8String],"%2x",&value)!=1) MDIE("【红】几何 c1 编码无效");
+                unsigned value=0;if(sscanf([[hex substringWithRange:NSMakeRange(i*2,2)] UTF8String],"%2x",&value)!=1) MDIE("[ERROR] invalid geometry c1 encoding");
                 bytes[i]=(unsigned char)value;
             }
             res_add(g->constants[role]);
         }
     }
-    cache[gs]=g;MLOG("几何计算路径已载入：%s",geometry);return g;
+    cache[gs]=g;MLOG("geometry compute path loaded: %s",geometry);return g;
 }

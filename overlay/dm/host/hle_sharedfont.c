@@ -30,10 +30,10 @@ static font_t font_map(const char *p) {
     if (fd < 0 || fstat(fd, &st)) { if (fd >= 0) close(fd); return f; }
     size_t n = (size_t)st.st_size;
     uint8_t *m = mmap(NULL, n + 8, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (m == MAP_FAILED) { LOG("【红】共享字体内存分配失败（%zu 字节）", n + 8); close(fd); return f; }
+    if (m == MAP_FAILED) { LOG("[ERROR] shared font allocation failed (%zu bytes)", n + 8); close(fd); return f; }
     size_t got = 0; while (got < n) { ssize_t r = pread(fd, m + 8 + got, n - got, (off_t)got); if (r <= 0) break; got += (size_t)r; }
     close(fd);
-    if (got != n) { LOG("【红】共享字体读不全：%s（%zu / %zu 字节）", p, got, n); munmap(m, n + 8); return f; }
+    if (got != n) { LOG("[ERROR] shared font short read: %s (%zu / %zu bytes)", p, got, n); munmap(m, n + 8); return f; }
     uint32_t done = 0x18029a7fu, len = __builtin_bswap32((uint32_t)n ^ 0x49621806u);
     memcpy(m, &done, 4); memcpy(m + 4, &len, 4);
     f.p = m; f.n = n + 8; return f;
@@ -43,7 +43,7 @@ static font_t font_first(const char *env, const char *file, const char *fallback
     if (dir && *dir) { snprintf(buf, sizeof buf, "%s/%s", dir, file); c[1] = buf; }
     for (int i = 0; i < 3; i++) {
         if (!c[i] || !*c[i]) continue;
-        font_t f = font_map(c[i]); if (f.p) { LOG("共享字体（%s）：%s（%zu 字节，BFTTF「已解」头 + 原样 TTF）", file, c[i], f.n - 8); return f; }
+        font_t f = font_map(c[i]); if (f.p) { LOG("shared font (%s): %s (%zu bytes, decoded BFTTF header + unmodified TTF)", file, c[i], f.n - 8); return f; }
     }
     return (font_t){0};
 }
@@ -51,19 +51,19 @@ static font_t font_get(int type) {
     static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER; static font_t std_f, ext_f; static int std_done, ext_done;
     pthread_mutex_lock(&mu);
     if (!std_done) { std_done = 1; std_f = font_first("DM_SHARED_FONT", "standard.ttf", "/System/Library/Fonts/Supplemental/Arial Unicode.ttf");
-                     if (!std_f.p) LOG("【红】标准共享字体打不开（DM_SHARED_FONT 或 DM_FONT_DIR/standard.ttf 指一个 TTF）"); }
+                     if (!std_f.p) LOG("[ERROR] cannot open standard shared font (set DM_SHARED_FONT or DM_FONT_DIR/standard.ttf to a TTF)"); }
     if (type == 5 && !ext_done) { ext_done = 1; ext_f = font_first("DM_SHARED_FONT_EXT", "nintendo_ext.ttf", NULL);
-                                  if (!ext_f.p) LOG("【黄】任天堂扩展共享字体缺（dm/tools/make_ext_font.py 生成 nintendo_ext.ttf）：按键图标会画成「?」"); }
+                                  if (!ext_f.p) LOG("[WARN] Nintendo extended shared font missing (generate nintendo_ext.ttf with dm/tools/make_ext_font.py); button icons will display '?'"); }
     font_t f = type == 5 && ext_f.p ? ext_f : std_f;
     pthread_mutex_unlock(&mu);
     return f;
 }
-HLE_FORCE("_ZN2nn2pl22GetSharedFontLoadStateENS0_14SharedFontTypeE", "共享字体装载状态：已装（1）", int, h_pl_LoadState, int type) { return font_get(type).p ? 1 : 0; }
-HLE_FORCE("_ZN2nn2pl20GetSharedFontAddressENS0_14SharedFontTypeE", "共享字体地址 → BFTTF 头（宿主替身字体）", const void *, h_pl_Addr, int type) { return font_get(type).p; }
-HLE_FORCE("_ZN2nn2pl17GetSharedFontSizeENS0_14SharedFontTypeE", "共享字体大小 → 头 8 字节 + 替身字体文件大小", size_t, h_pl_Size, int type) { return font_get(type).n; }
+HLE_FORCE("_ZN2nn2pl22GetSharedFontLoadStateENS0_14SharedFontTypeE", "Shared-font load state: loaded (1)", int, h_pl_LoadState, int type) { return font_get(type).p ? 1 : 0; }
+HLE_FORCE("_ZN2nn2pl20GetSharedFontAddressENS0_14SharedFontTypeE", "Shared-font address: BFTTF header with host replacement font", const void *, h_pl_Addr, int type) { return font_get(type).p; }
+HLE_FORCE("_ZN2nn2pl17GetSharedFontSizeENS0_14SharedFontTypeE", "Shared-font size: 8-byte header plus replacement font file", size_t, h_pl_Size, int type) { return font_get(type).n; }
 // SDK 20 在查询地址前显式请求加载；直接加载同一字体缓存，不能再落回不存在的 pl/sm 服务。
 // SDK 20 explicitly requests loading before querying addresses; load the same cache instead of reaching the absent pl/sm services.
-HLE_FORCE("_ZN2nn2pl21RequestSharedFontLoadENS0_14SharedFontTypeE", "请求共享字体：同步加载宿主字体，不连接 Switch 字体服务", void, h_pl_RequestLoad, int type) {
+HLE_FORCE("_ZN2nn2pl21RequestSharedFontLoadENS0_14SharedFontTypeE", "Request shared font: synchronously load host font without Switch font service", void, h_pl_RequestLoad, int type) {
     (void)font_get(type);
 }
 
@@ -71,7 +71,7 @@ HLE_FORCE("_ZN2nn2pl21RequestSharedFontLoadENS0_14SharedFontTypeE", "请求共�
 // SDK ABI of SharedFontData: type +0, address +8, size +16, stride 24; the available count may exceed output capacity.
 typedef struct { int32_t type; uint32_t reserved; const void *address; uint64_t size; } shared_font_data;
 _Static_assert(sizeof(shared_font_data) == 24, "SharedFontData ABI");
-HLE_FORCE("_ZN2nn2pl13GetSharedFontEPiPNS0_14SharedFontDataEiNS_8settings12LanguageCodeE", "枚举共享字体：按宿主语言优先级提供同一已加载缓存", unsigned, h_pl_Get, int *count, shared_font_data *out, int capacity, uint64_t language) {
+HLE_FORCE("_ZN2nn2pl13GetSharedFontEPiPNS0_14SharedFontDataEiNS_8settings12LanguageCodeE", "Enumerate shared fonts: shared loaded cache ordered by host language", unsigned, h_pl_Get, int *count, shared_font_data *out, int capacity, uint64_t language) {
     char code[9] = {0}; memcpy(code, &language, 8);
     int first = !strcmp(code, "zh-CN") || !strcmp(code, "zh-Hans") ? 1 :
                 !strcmp(code, "zh-TW") || !strcmp(code, "zh-Hant") ? 3 : !strcmp(code, "ko") ? 4 : 0;
@@ -89,5 +89,5 @@ HLE_FORCE("_ZN2nn2pl13GetSharedFontEPiPNS0_14SharedFontDataEiNS_8settings12Langu
 }
 // 是否跑在 Switch 2（代号 Ounce）上（返回 bool）：宿主按 Switch 1 报假。马力欧 1.2.1 据此决定要不要数追加内容（升级包）、提示升级到 Switch 2 版
 // Whether running on a Switch 2 (codename Ounce) (returns bool): the host reports false, as a Switch 1. Mario 1.2.1 uses it to decide whether to count add-on content (the upgrade pack) and suggest the Switch 2 Edition
-HLE_FORCE("_ZN2nn2pl16IsRunningOnOunceEv", "是否 Switch 2：否", unsigned, h_pl_IsOunce, void) { return 0; }
+HLE_FORCE("_ZN2nn2pl16IsRunningOnOunceEv", "Is Switch 2: false", unsigned, h_pl_IsOunce, void) { return 0; }
 

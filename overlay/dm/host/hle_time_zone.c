@@ -42,11 +42,11 @@ static Result zone_calendar_time(CalendarTime *out, CalendarAdditionalInfo *info
 void dm_time_device_zone(TimeLocationName *out) {
     CFTimeZoneResetSystem(); CFTimeZoneRef z=CFTimeZoneCopySystem(); TimeLocationName name={0};
     if (!z || !CFStringGetCString(CFTimeZoneGetName(z),name.name,sizeof name.name,kCFStringEncodingUTF8)) {
-        if (z) CFRelease(z); die("【红】无法读取宿主系统时区名称");
+        if (z) CFRelease(z); die("[ERROR] cannot read host system timezone name");
     }
     CFRelease(z); *out=name;
 }
-HLE_FORCE("_ZN2nn4time21GetDeviceLocationNameEPNS0_12LocationNameE", "设备时区：读取 Apple 系统 IANA 名称，不连接 Switch 时区服务", void, h_time_DeviceZone, TimeLocationName *out) {
+HLE_FORCE("_ZN2nn4time21GetDeviceLocationNameEPNS0_12LocationNameE", "Device timezone: Apple system IANA name without Switch timezone service", void, h_time_DeviceZone, TimeLocationName *out) {
     dm_time_device_zone(out);
 }
 // 快照的名称和日期必须使用同一个时区，内部格式单独封装。
@@ -65,13 +65,13 @@ int dm_time_snapshot_calendar(CalendarTime *date, SnapshotCalendarAdditionalInfo
     info->dst = extra.dst; info->offset = extra.offset;
     return 1;
 }
-HLE_FORCE("_ZN2nn4time16LoadTimeZoneRuleEPNS0_12TimeZoneRuleERKNS0_12LocationNameE", "时区规则：保存可复制名称，转换使用 Apple 时区数据库", Result, h_time_LoadZone, TimeZoneRule *out, const TimeLocationName *name) {
+HLE_FORCE("_ZN2nn4time16LoadTimeZoneRuleEPNS0_12TimeZoneRuleERKNS0_12LocationNameE", "Timezone rule: copyable name, conversions use Apple timezone database", Result, h_time_LoadZone, TimeZoneRule *out, const TimeLocationName *name) {
     if (!out || !name) return RES_FAIL;
     CFTimeZoneRef z=zone_named(name->name); if (!z) return RES_FAIL;
     CFRelease(z); memset(out,0,sizeof *out); uint64_t magic=DM_TZ_MAGIC;
     memcpy(out->bytes,&magic,8); memcpy(out->bytes+8,name->name,sizeof name->name); return RES_OK;
 }
-HLE_FORCE("_ZN2nn4time14ToCalendarTimeEPNS0_12CalendarTimeEPNS0_22CalendarAdditionalInfoERKNS0_9PosixTimeERKNS0_12TimeZoneRuleE", "指定规则的日历换算：使用规则对应时区，保留夏令时与 UTC 偏移", Result, h_time_CalendarRule, CalendarTime *out, CalendarAdditionalInfo *info, const int64_t *time, const TimeZoneRule *rule) {
+HLE_FORCE("_ZN2nn4time14ToCalendarTimeEPNS0_12CalendarTimeEPNS0_22CalendarAdditionalInfoERKNS0_9PosixTimeERKNS0_12TimeZoneRuleE", "Calendar conversion with specified timezone rule, DST and UTC offset preserved", Result, h_time_CalendarRule, CalendarTime *out, CalendarAdditionalInfo *info, const int64_t *time, const TimeZoneRule *rule) {
     CFTimeZoneRef z=zone_rule(rule); if (!z) return RES_FAIL;
     Result r=zone_calendar_time(out,info,time,z); CFRelease(z); return r;
 }
@@ -99,7 +99,7 @@ static Result zone_posix(int *count, int64_t *out, int capacity, const CalendarT
     if(n>2) return RES_FAIL;
     int written=n<capacity?n:capacity; for(int i=0;i<written;i++) out[i]=values[i]; *count=written; return RES_OK;
 }
-HLE_FORCE("_ZN2nn4time11ToPosixTimeEPiPNS0_9PosixTimeEiRKNS0_12CalendarTimeERKNS0_12TimeZoneRuleE", "指定规则的反向日历换算：处理夏令时重复/缺失时刻，只写容量内结果", Result, h_time_PosixRule, int *count, int64_t *out, int capacity, const CalendarTime *date, const TimeZoneRule *rule) {
+HLE_FORCE("_ZN2nn4time11ToPosixTimeEPiPNS0_9PosixTimeEiRKNS0_12CalendarTimeERKNS0_12TimeZoneRuleE", "Reverse calendar conversion with specified rule: handle DST overlaps/gaps within output capacity", Result, h_time_PosixRule, int *count, int64_t *out, int capacity, const CalendarTime *date, const TimeZoneRule *rule) {
     CFTimeZoneRef z=zone_rule(rule); if(!z) return RES_FAIL;
     Result r=zone_posix(count,out,capacity,date,z); CFRelease(z); return r;
 }

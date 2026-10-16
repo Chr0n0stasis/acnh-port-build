@@ -40,7 +40,7 @@ static class SwshXlate
         public bool QueryVertexAsComputeDrawOrderInputs() => _job["draw_order_attributes"]?.GetValue<bool>() == true;
         // c1 常数段（着色器包控制段前 0x100 字节）：间接跳转 BRX 的跳转表在这里（LDC c[1]）；不提供时翻译器解不出跳转目标、控制流出错（粒子着色器死循环）
         // c1 constant segment (the 0x100 bytes before the control segment in the shader package): the jump table of indirect jump BRX lives here (LDC c[1]); without it the translator cannot resolve jump targets and control flow goes wrong (particle shaders loop forever)
-        public uint ConstantBuffer1Read(int offset) { if (offset >= 0 && offset + 4 <= _c1.Length) return BitConverter.ToUInt32(_c1, offset); Notes.Add($"c1 读越界 +{offset:X}（c1 长 {_c1.Length}）"); return 0; }
+        public uint ConstantBuffer1Read(int offset) { if (offset >= 0 && offset + 4 <= _c1.Length) return BitConverter.ToUInt32(_c1, offset); Notes.Add($"c1 read out of bounds +{offset:X} (length {_c1.Length})"); return 0; }
         // 全部资源放进第 0 组，各占不同绑定号（spirv-cross 出成一个参数缓冲）；常量段号 index 的缓冲由翻译器给 binding = index+1 的惯例不依赖
         // All resources go into set 0, each with a distinct binding number (spirv-cross emits them as one argument buffer); the translator's convention of giving the buffer of constant segment number index binding = index+1 is not relied on
         public SetBindingPair CreateConstantBufferBinding(int index) => new(0, _binding++);
@@ -63,7 +63,7 @@ static class SwshXlate
         {
             int slot = TexSlot(handle, cbufSlot);
             string t = slot >= 0 ? Get("tex", slot) ?? Get("img", slot) : null;
-            if (t == null) { Notes.Add($"贴图句柄 {handle:X}（常量段 {cbufSlot}，槽 {slot}）无 PC 类型，按 2D"); return SamplerType.Texture2D; }
+            if (t == null) { Notes.Add($"texture handle {handle:X} (constant buffer {cbufSlot}, slot {slot}) has no PC type; use 2D"); return SamplerType.Texture2D; }
             return t switch
             {
                 "1d" => SamplerType.Texture1D, "1darray" => SamplerType.Texture1D | SamplerType.Array,
@@ -77,7 +77,7 @@ static class SwshXlate
         {
             int slot = TexSlot(handle, cbufSlot);
             string f = _job["img"] is JsonObject t && slot >= 0 && t[slot.ToString()] is JsonObject o ? (string)o["fmt"] : null;
-            if (f == null) { Notes.Add($"图像句柄 {handle:X} 槽 {slot} 无 PC 格式，按 R8G8B8A8Unorm"); return TextureFormat.R8G8B8A8Unorm; }
+            if (f == null) { Notes.Add($"image handle {handle:X} slot {slot} has no PC format; use R8G8B8A8Unorm"); return TextureFormat.R8G8B8A8Unorm; }
             return Enum.TryParse(f, true, out TextureFormat tf) ? tf : TextureFormat.R8G8B8A8Unorm;
         }
         int Local(int i) => _job["local"] is JsonArray a && a.Count > i ? (int)a[i] : 1;
@@ -158,7 +158,7 @@ static class SwshXlate
                 File.WriteAllText(Path.Combine(output, key + ".geometry.json"), metadata.ToJsonString());
                 Console.WriteLine($"{key}: VS compute / GS compute / passthrough vertex generated");
             }
-            catch (Exception e) { bad++; Console.Error.WriteLine($"【红】{key}: {e}"); }
+            catch (Exception e) { bad++; Console.Error.WriteLine($"[ERROR] {key}: {e}"); }
         }
         return bad == 0 ? 0 : 1;
     }
@@ -201,9 +201,9 @@ static class SwshXlate
                 File.WriteAllText(Path.Combine(outDir, key + ".res.json"), res.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
                 ok++;
             }
-            catch (Exception e) { bad++; Console.Error.WriteLine($"【红】{key}：{e.GetType().Name}：{e.Message.Split('\n')[0]}"); if (Environment.GetEnvironmentVariable("DMSH_STACK") != null) Console.Error.WriteLine(e.StackTrace); }
+            catch (Exception e) { bad++; Console.Error.WriteLine($"[ERROR] {key}: {e.GetType().Name}: {e.Message.Split('\n')[0]}"); if (Environment.GetEnvironmentVariable("DMSH_STACK") != null) Console.Error.WriteLine(e.StackTrace); }
         }
-        Console.WriteLine($"翻译 {ok} 成功，{bad} 失败");
+        Console.WriteLine($"Translation: {ok} succeeded, {bad} failed");
         return bad == 0 ? 0 : 1;
     }
 }

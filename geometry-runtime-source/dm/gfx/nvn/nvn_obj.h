@@ -11,7 +11,7 @@
 #include "nvn_tex.h"
 
 #define MAGIC(a, b, c, d) ((uint32_t)(a) | (uint32_t)(b) << 8 | (uint32_t)(c) << 16 | (uint32_t)(d) << 24)
-#define FITS(T, H) _Static_assert(sizeof(T) <= sizeof(H), #T " 超出 " #H " 的保留大小")
+#define FITS(T, H) _Static_assert(sizeof(T) <= sizeof(H), #T " exceeds " #H " reserved size")
 
 typedef struct { uint32_t flags; } dev_builder_t;                       FITS(dev_builder_t, NVNdeviceBuilder);
 typedef struct { uint32_t magic, flags, origin, depth_mode; void *dbg_cb, *dbg_data; } dev_t_;  FITS(dev_t_, NVNdevice);
@@ -40,7 +40,7 @@ typedef struct {
     uint32_t magic; nvn_texdesc d; uint8_t has_layout, set_swz; uint16_t swz; nvn_texlayout L; uint8_t *mem; pool_t *pool; int64_t off; uint8_t layout[8];
     uint64_t serial;                     // 初始化序号：回放层按它在宿主表里找 MTLTexture（游戏可能按值拷贝对象，不能存对象指针） | Initialization serial: the replay layer uses it to find the MTLTexture in the host table (the game may copy the object by value, so object pointers cannot be stored)
 } tex_t;                                                                                     FITS(tex_t, NVNtexture);
-_Static_assert(sizeof(tex_t) <= 0x80, "tex_t 超出较新 SDK 的 NVNtexture（0x80）");
+_Static_assert(sizeof(tex_t) <= 0x80, "tex_t exceeds newer SDK NVNtexture size (0x80)");
 // 较新 SDK（NVN 55，SMBW）的 NVNtextureView 只有 16 字节：游戏把它放在 16 字节的栈槽里（main +0x5796c），原先 28 字节的记录写出界、盖掉保存的 fp / lr，
 //   函数返回到 0x100000000 崩。压成 16 字节：级 / 层 / 格式 / 目标 + 通道重排与深度模板模式（后两项先只记下）
 // The newer SDK's (NVN 55, SMBW) NVNtextureView is only 16 bytes: the game keeps it in a 16-byte stack slot (main +0x5796c), and the former 28-byte record wrote out of bounds over the saved fp / lr,
@@ -48,7 +48,7 @@ _Static_assert(sizeof(tex_t) <= 0x80, "tex_t 超出较新 SDK 的 NVNtexture（0
 typedef struct { uint8_t set_levels : 1, set_layers : 1, set_format : 1, set_target : 1, set_swizzle : 1, set_dsmode : 1, dsmode : 2;
                  uint8_t target, base_level, nlevels; uint16_t format, min_layer, nlayers; uint8_t swz[4]; uint16_t _rsv; } view_t;
 FITS(view_t, NVNtextureView);
-_Static_assert(sizeof(view_t) <= 16, "view_t 超出较新 SDK 的 NVNtextureView（16 字节）");
+_Static_assert(sizeof(view_t) <= 16, "view_t exceeds newer SDK NVNtextureView size (16 bytes)");
 
 // 采样器参数（builder 与对象共用一份）
 // Sampler parameters (one copy shared by builder and object)

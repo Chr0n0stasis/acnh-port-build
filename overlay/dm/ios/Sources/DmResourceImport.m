@@ -89,8 +89,10 @@ UIViewController *front_ios_root(void);
         });
     });
 }
-- (void)finishNetwork:(NSString *)message {
-    fprintf(stderr,"resources: %s\n",message.UTF8String);
+// 界面继续显示本地化提示，日志使用稳定英文诊断和错误域/编号。
+// Keep localized UI messages, while logs use stable English diagnostics and error domain/code.
+- (void)finishNetwork:(NSString *)message diagnostic:(const char *)diagnostic error:(NSError *)error {
+    fprintf(stderr,"resources: %s (domain=%s code=%ld)\n",diagnostic,error.domain.UTF8String ?: "none",(long)error.code);
     dispatch_async(dispatch_get_main_queue(),^{
         [self.downloadTimer invalidate]; self.downloadTimer=nil;
         self.busy=NO; self.importButton.enabled=YES; self.downloadButton.enabled=YES;
@@ -122,19 +124,19 @@ UIViewController *front_ios_root(void);
     config.timeoutIntervalForRequest=60; config.timeoutIntervalForResource=7200;
     self.session=[NSURLSession sessionWithConfiguration:config];
     [[self.session dataTaskWithURL:url completionHandler:^(NSData *data,NSURLResponse *response,NSError *error){
-        if (error || ((NSHTTPURLResponse *)response).statusCode!=200 || data.length>(1<<20)) { [self finishNetwork:error.localizedDescription ?: @"读取清单失败，请检查地址、电脑防火墙和局域网权限。"]; return; }
+        if (error || ((NSHTTPURLResponse *)response).statusCode!=200 || data.length>(1<<20)) { [self finishNetwork:error.localizedDescription ?: @"读取清单失败，请检查地址、电脑防火墙和局域网权限。" diagnostic:"Manifest download failed" error:error]; return; }
         NSDictionary *manifest=[NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
         if (![manifest isKindOfClass:NSDictionary.class] || ![manifest[@"volumes"] isKindOfClass:NSArray.class] ||
             ![manifest[@"pack_id"] isKindOfClass:NSString.class] || ![[NSUUID alloc] initWithUUIDString:manifest[@"pack_id"]] ||
             ![manifest[@"parts"] isKindOfClass:NSNumber.class] || [manifest[@"volumes"] count]!=[manifest[@"parts"] unsignedIntValue] ||
-            ![manifest[@"volumes"] count] || [manifest[@"volumes"] count]>128) { [self finishNetwork:@"电脑提供的资源清单格式不正确。"]; return; }
+            ![manifest[@"volumes"] count] || [manifest[@"volumes"] count]>128) { [self finishNetwork:@"电脑提供的资源清单格式不正确。" diagnostic:"Invalid resource manifest" error:nil]; return; }
         unsigned expectedPart=1;
         for (NSDictionary *volume in manifest[@"volumes"]) {
             if (![volume isKindOfClass:NSDictionary.class] || ![volume[@"file"] isKindOfClass:NSString.class] ||
                 ![volume[@"file"] isEqual:[NSString stringWithFormat:@"ACNH-resources.part%02u.zip",expectedPart]] ||
                 ![volume[@"part"] isEqual:@(expectedPart)] || ![volume[@"bytes"] isKindOfClass:NSNumber.class] ||
                 [volume[@"bytes"] unsignedLongLongValue]>(8ull<<30) || ![volume[@"sha256"] isKindOfClass:NSString.class] || [volume[@"sha256"] length]!=64) {
-                [self finishNetwork:@"电脑提供的分卷清单无效。"]; return;
+                [self finishNetwork:@"电脑提供的分卷清单无效。" diagnostic:"Invalid resource volume list" error:nil]; return;
             }
             expectedPart++;
         }
@@ -159,13 +161,13 @@ UIViewController *front_ios_root(void);
             [self.downloadTimer invalidate]; self.downloadTimer=nil;
             self.status.text=[NSString stringWithFormat:@"正在校验第 %@ / %@ 卷…",volume[@"part"],self.serverManifest[@"parts"]];
         });
-        if (error || ((NSHTTPURLResponse *)response).statusCode!=200 || !temporary) { [self finishNetwork:error.localizedDescription ?: @"分卷下载失败，已导入的卷会保留。"]; return; }
+        if (error || ((NSHTTPURLResponse *)response).statusCode!=200 || !temporary) { [self finishNetwork:error.localizedDescription ?: @"分卷下载失败，已导入的卷会保留。" diagnostic:"Volume download failed; imported volumes retained" error:error]; return; }
         FILE *file=fopen(temporary.fileSystemRepresentation,"rb");
-        if (!file) { [self finishNetwork:@"无法读取下载缓存。"]; return; }
+        if (!file) { [self finishNetwork:@"无法读取下载缓存。" diagnostic:"Cannot open download cache" error:nil]; return; }
         CC_SHA256_CTX sha; CC_SHA256_Init(&sha); unsigned char buffer[65536],digest[32]; uint64_t size=0; size_t n;
         while ((n=fread(buffer,1,sizeof buffer,file))) { CC_SHA256_Update(&sha,buffer,(CC_LONG)n);size+=n; }
         BOOL good=!ferror(file); fclose(file); CC_SHA256_Final(digest,&sha); char text[65];for(int i=0;i<32;i++)snprintf(text+2*i,3,"%02x",digest[i]);
-        if (!good || size!=[volume[@"bytes"] unsignedLongLongValue] || ![@(text) isEqual:volume[@"sha256"]]) { [NSFileManager.defaultManager removeItemAtURL:temporary error:nil]; [self finishNetwork:@"下载的分卷校验失败，请重新连接电脑重试。"]; return; }
+        if (!good || size!=[volume[@"bytes"] unsignedLongLongValue] || ![@(text) isEqual:volume[@"sha256"]]) { [NSFileManager.defaultManager removeItemAtURL:temporary error:nil]; [self finishNetwork:@"下载的分卷校验失败，请重新连接电脑重试。" diagnostic:"Downloaded volume checksum or size mismatch" error:nil]; return; }
         dispatch_async(dispatch_get_main_queue(),^{self.status.text=[NSString stringWithFormat:@"正在解压第 %@ / %@ 卷…",volume[@"part"],self.serverManifest[@"parts"]];});
         __block CFTimeInterval last=0;
         NSDictionary *result=dm_resource_import(temporary,self.documents,^(uint64_t done,uint64_t total){
@@ -173,12 +175,12 @@ UIViewController *front_ios_root(void);
             dispatch_async(dispatch_get_main_queue(),^{self.progress.progress=total?(float)((double)done/total):1;});
         },&error);
         [NSFileManager.defaultManager removeItemAtURL:temporary error:nil];
-        if (!result) { [self finishNetwork:error.localizedDescription ?: @"资源解压失败。"]; return; }
+        if (!result) { [self finishNetwork:error.localizedDescription ?: @"资源解压失败。" diagnostic:"Volume extraction failed" error:error]; return; }
         if ([result[@"complete"] boolValue]) {
-            [self finishNetwork:@"资源导入完成，正在启动…"];
+            [self finishNetwork:@"资源导入完成，正在启动…" diagnostic:"Resource import complete; starting game" error:nil];
             dispatch_async(dispatch_get_main_queue(),^{if(front_ios_retry_boot())self.view.window.rootViewController=front_ios_root();});
         } else if (next<volumes.count) [self downloadVolume:next];
-        else [self finishNetwork:@"尚缺资源分卷，请重新连接电脑继续导入。"]; 
+        else [self finishNetwork:@"尚缺资源分卷，请重新连接电脑继续导入。" diagnostic:"Resource volumes still missing; reconnect to continue" error:nil];
     }];
     dispatch_async(dispatch_get_main_queue(),^{
         [self.downloadTimer invalidate];
