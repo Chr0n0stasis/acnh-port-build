@@ -5,6 +5,9 @@ from pathlib import Path
 
 mac, ios = map(Path, sys.argv[1:3])
 bringup = '--bringup' in sys.argv[3:]
+ios_only = '--ios-only' in sys.argv[3:]
+platforms = (ios,) if ios_only else (mac, ios)
+reflection_root = ios if ios_only else mac
 integrated_geometry = os.environ.get('DM_GEOMETRY_RUNTIME') == '1'
 geometry = {c[3] for line in Path('source/dm/games/acnh/shader_map.tsv').read_text().splitlines()
             if len(c := line.split('\t')) > 4 and c[2] == '几何'}
@@ -23,11 +26,13 @@ def is_metallib(path):
 
 for row in checked:
     key = row['key'] + '_b'
-    for root in (mac, ios):
+    for root in platforms:
         lib = root / (key + '.metallib')
         if not is_metallib(lib):
             problems.append(f'{root.name}/{key}: missing compiled Metal library')
-    meta = json.loads((mac / (key + '.json')).read_text())
+    meta = json.loads((reflection_root / (key + '.json')).read_text())
+    if ios_only and '-sdk iphoneos' not in meta.get('chain_metal', ''):
+        problems.append(f'{key}: reflection is not from iOS compilation')
     if meta.get('chain') != mac.name.removeprefix('b-'):
         problems.append(f'{key}: shader chain mismatch')
     if meta.get('msl_entry_kind') not in {'vertex', 'fragment', 'kernel'}:
@@ -41,20 +46,20 @@ if problems:
     Path('output/shader-problems.txt').write_text('\n'.join(problems))
     raise SystemExit(f'Shader interface validation failed: {len(problems)} problems')
 geometry_programs = 0
-manifest_path = mac / '_geometry_manifest.json'
+manifest_path = reflection_root / '_geometry_manifest.json'
 if manifest_path.exists():
     manifest = json.loads(manifest_path.read_text())
     assert manifest['compiled'] and manifest['chain'] == mac.name.removeprefix('b-')
     assert {p['gs'] for p in manifest['pairs']} == geometry
     for pair in manifest['pairs']:
-        metadata = json.loads((mac / pair['metadata']).read_text())
+        metadata = json.loads((reflection_root / pair['metadata']).read_text())
         assert metadata['compiled'] and metadata['chain'] == manifest['chain']
         if integrated_geometry:
             assert metadata['attribute_layout'] == 'draw-order-float4'
         assert metadata['vs'] == pair['vs'] and metadata['gs'] == pair['gs'] and metadata['ps'] == pair['ps']
         assert len(metadata['programs']) == 3
         for program in metadata['programs'].values():
-            for directory in (mac, ios):
+            for directory in platforms:
                 assert is_metallib(directory / program['library'])
             geometry_programs += 1
 if deferred:
@@ -64,6 +69,6 @@ if deferred:
         'lowered_geometry_programs_compiled': geometry_programs,
         'geometry_renderer_integrated': integrated_geometry,
         'requires_device_test': True}, indent=2))
-print(f'Compiled and checked {len(checked)} macOS/iOS shader libraries; deferred geometry: {len(deferred)}')
+print(f'Compiled and checked {len(checked)} {"iOS" if ios_only else "macOS/iOS"} shader libraries; deferred geometry: {len(deferred)}')
 if geometry_programs:
     print(f'Geometry lowering: {geometry_programs} compiled programs; renderer {"included; target-device verification pending" if integrated_geometry else "integration pending"}')

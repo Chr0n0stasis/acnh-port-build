@@ -92,7 +92,9 @@ def execution_model(code):
     return models[0]
 
 
-def build(jobs, output, chain, translator, spirv_cross='spirv-cross', ios_output=None, compile_libraries=True):
+def build(jobs, output, chain, translator, spirv_cross='spirv-cross', ios_output=None, compile_libraries=True, compile_mac=True):
+    if compile_libraries and not compile_mac and not ios_output:
+        raise ValueError('At least one Metal target is required')
     output = Path(output); output.mkdir(parents=True, exist_ok=True)
     if ios_output:
         ios_output = Path(ios_output); ios_output.mkdir(parents=True, exist_ok=True)
@@ -130,11 +132,12 @@ def build(jobs, output, chain, translator, spirv_cross='spirv-cross', ios_output
                     raise ValueError(f'{name}: constant bank exceeds 64 KiB')
             metadata['programs'][role] = p
             if compile_libraries:
-                library = output / p['library']; air = output / (name + '.air')
-                subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', str(msl), '-o', str(air)], check=True)
-                subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(air), '-o', str(library)], check=True)
-                if library.read_bytes()[:4] != b'MTLB':
-                    raise ValueError(f'{library}: not a compiled library')
+                if compile_mac:
+                    library = output / p['library']; air = output / (name + '.air')
+                    subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', str(msl), '-o', str(air)], check=True)
+                    subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(air), '-o', str(library)], check=True)
+                    if library.read_bytes()[:4] != b'MTLB':
+                        raise ValueError(f'{library}: not a compiled library')
                 if ios_output:
                     import ios_metal
                     ios_library = ios_output / p['library']
@@ -143,6 +146,7 @@ def build(jobs, output, chain, translator, spirv_cross='spirv-cross', ios_output
                     if ios_library.read_bytes()[:4] != b'MTLB':
                         raise ValueError(f'{ios_library}: not a compiled library')
         metadata['compiled'] = bool(compile_libraries)
+        metadata['compiled_targets'] = (['macos'] if compile_mac else []) + (['ios'] if ios_output else []) if compile_libraries else []
         destination = output / (key + '.geometry.json')
         destination.write_text(json.dumps(metadata, indent=2), encoding='utf8')
         if compile_libraries and ios_output:

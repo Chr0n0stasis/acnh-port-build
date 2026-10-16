@@ -1,5 +1,5 @@
 diff --git a/AGENTS.md b/AGENTS.md
-index fc346a7..7673774 100644
+index fc346a7..18d3a63 100644
 --- a/AGENTS.md
 +++ b/AGENTS.md
 @@ -6,7 +6,7 @@
@@ -11,6 +11,13 @@ index fc346a7..7673774 100644
  - After changing anything on the shader translation chain, run the chain procedure for each affected profile. The chain covers `dm/gfx/tools/dmsh_*`, `Program.cs`, the profile's `shader_map.tsv` / `shader_facts.tsv` / `shader_pairs.tsv`, and its `nvn_*` / `shader_*` keys. The procedure:
    1. Run `dmsh_chain.py --header`, which writes the profile's `dmsh_chain.h`.
    2. Rebuild the shaders (Mac and, with `IOSOUT`, iOS).
+@@ -14,5 +14,5 @@
+   4. Rebuild the host.
+ 
+   The host only loads libraries of its own chain version. The translator is `dm/gfx/tools/dmsh_xlate_bin`, which matches `dmsh_chain.lock`; a fresh `dotnet publish` does not.
+-- iOS builds are unsigned IPAs that the user sideloads and tests; diagnostics come back as the app's `Documents/log.txt`. Do not sign or install builds on the user's devices.
++- iOS builds are unsigned IPAs that the user sideloads and tests; diagnostics come back as the app's `Documents/log.txt`. Do not sign or install builds on the user's devices. After dispatching Actions, return the run link without waiting or polling; the user will test the build and provide logs.
+ - Commit only when asked, with `git -c user.name=seedds -c user.email=ext6@xcra.ai commit`.
 diff --git a/dm/games/game.py b/dm/games/game.py
 index 27d6045..cbf52b4 100644
 --- a/dm/games/game.py
@@ -3334,10 +3341,10 @@ index 3aa4496..c1ded81 100755
  
  if __name__ == "__main__":
 diff --git a/dm/gfx/tools/dmsh_build.py b/dm/gfx/tools/dmsh_build.py
-index a3ca553..2e8c5b1 100644
+index a3ca553..1378c65 100644
 --- a/dm/gfx/tools/dmsh_build.py
 +++ b/dm/gfx/tools/dmsh_build.py
-@@ -15,19 +15,21 @@
+@@ -15,20 +15,27 @@
  # Build output: <key>_b.metallib, <key>_b.json (replay reflection, including drv_reads, the runtime read offsets into driver segments c0 / c2), <key>_b.metal (MSL)
  # Environment IOSOUT=dir: the same MSL also goes through dm/ios/tools/ios_metal.compile to produce an iphoneos metallib + reflection (chain_metal records the iOS compile convention)
  # Final summary: success / failure counts and the distribution of reasons; distribution of driver segment read offsets (those outside the range the replay layer can fill are listed separately)
@@ -3360,9 +3367,15 @@ index a3ca553..2e8c5b1 100644
 -if not os.path.exists(dmsh_facts.TABLE): sys.exit(f'【红】没有作答表 {dmsh_facts.TABLE}（随游戏档案；空表 = 全部按缺省作答）')
 +if not os.path.exists(dmsh_facts.TABLE): sys.exit(f'[ERROR] missing shader facts table {dmsh_facts.TABLE} (game profile; empty table uses defaults)')
  IOSOUT = os.environ.get('IOSOUT')   # 设了就同时出 iOS 版（iphoneos metallib + 反射）到该目录 | if set, also build the iOS version (iphoneos metallib + reflection) into that directory
++# 中间 MSL/反射始终保留；iOS 独立构建不再额外编译 macOS 库。
++# Always retain intermediate MSL/reflection; iOS-only builds skip macOS libraries.
++BUILD_MAC = os.environ.get('DMSH_MAC', '1') != '0'
++if not BUILD_MAC and not IOSOUT: sys.exit('DMSH_MAC=0 requires IOSOUT')
++
  if IOSOUT:
      sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../ios/tools')); import ios_metal
-@@ -53,7 +55,7 @@ SSBO = {k: int(v, 0) for k, v in GAME.pairs('nvn_ssbo_bases')}   # c0 存储缓
+     IOSOUT = os.path.join(IOSOUT, 'b-' + CHAIN); os.makedirs(IOSOUT, exist_ok=True)
+@@ -53,7 +60,7 @@ SSBO = {k: int(v, 0) for k, v in GAME.pairs('nvn_ssbo_bases')}   # c0 存储缓
  #   So the profile's bases must equal the translator's only when the answer table has per-slot texture / image facts (otherwise the wrong slot is looked up); Engage (0x168 / 0x568) has no such facts, so the translator needs no change
  _xb = re.search(r'const int TexBase = (0x[0-9a-fA-F]+), SampBase = (0x[0-9a-fA-F]+);', open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dmsh_xlate/Program.cs')).read())
  if (not _xb or (int(_xb.group(1), 16), int(_xb.group(2), 16)) != (TEX_BASE, SAMP_BASE)) and any(f.get('tex') or f.get('img') for f in FACTS.values()):
@@ -3371,8 +3384,12 @@ index a3ca553..2e8c5b1 100644
  
  def records(d):
      r = [m.start() for m in re.finditer(b'BTCDBTCD', d)]
-@@ -93,8 +95,8 @@ def tool_fingerprint():
-             '\0xc\0' + repr(XC) + '\0mac\0' + MAC_RECORD + '\0ios\0' + (ios_metal.RECORD if IOSOUT else ''))
+@@ -90,11 +97,11 @@ def tool_fingerprint():
+     sc = subprocess.run(['spirv-cross', '--version'], capture_output=True, text=True, timeout=30)
+     return ('lock\0' + open(dmsh_chain.LOCK).read() + '\0options\0' + dmsh_chain.options() +
+             '\0xlate\0' + dmsh_chain.xlate_source_sha() + '\0spirv-cross\0' + sc.stdout + sc.stderr +
+-            '\0xc\0' + repr(XC) + '\0mac\0' + MAC_RECORD + '\0ios\0' + (ios_metal.RECORD if IOSOUT else ''))
++            '\0xc\0' + repr(XC) + '\0mac\0' + (MAC_RECORD if BUILD_MAC else 'disabled') + '\0ios\0' + (ios_metal.RECORD if IOSOUT else ''))
  
  def shader_key(key, name, rec):
 -    pc = dmsh_facts.row(key, FACTS[key]).encode() if key in FACTS else '缺'.encode()
@@ -3382,7 +3399,22 @@ index a3ca553..2e8c5b1 100644
      embedded = rec if name.startswith('main.rodata@') else b''
      payload = (b'record\0' + rec + b'\0map\0' + map_row + b'\0pc\0' + pc + b'\0embedded\0' + embedded +
                 b'\0tools\0' + TOOL_FP + b'\0code\0' + CODE_FP.encode() +
-@@ -134,11 +136,11 @@ def restore_cache(key, digest):
+@@ -107,12 +114,12 @@ def cache_path(digest): return os.path.join(CAS, 'shader', digest)
+ def cache_outputs(key, digest, cached=False):
+     root = cache_path(digest); files = {}
+     for label, directory, names in (
+-            ('mac', out, [key + '_b.metallib', key + '_b.metal', key + '_b.json']),
++            ('mac', out, ([key + '_b.metallib'] if BUILD_MAC else []) + [key + '_b.metal', key + '_b.json']),
+             ('ios', IOSOUT, [key + '_b.metallib', key + '_b.json'])):
+         if not directory: continue
+         base = os.path.join(root, label) if cached else directory
+         found = [n for n in names if os.path.exists(os.path.join(base, n))]
+-        if key + '_b.metallib' not in found or key + '_b.json' not in found: return None
++        if any(name not in found for name in names): return None
+         files[label] = found
+     return root, files
+ 
+@@ -134,11 +141,11 @@ def restore_cache(key, digest):
  def cache_lookup(key, digest, rule_fp, code_fp):
      with CAS_LOCKS_GUARD: lock = CAS_LOCKS.setdefault(('shader', key), threading.Lock())
      with lock:
@@ -3398,7 +3430,60 @@ index a3ca553..2e8c5b1 100644
          PRE_STATS['miss'] += 1; PRE_STATS[reason] += 1; return False, reason
  
  def publish_cache(key, digest, rule_fp, code_fp):
-@@ -255,7 +257,7 @@ def main_rec(mi, o):
+@@ -160,7 +167,7 @@ BF_STATS = collections.Counter()
+ def bf_digest(msl, key):
+     h = hashlib.sha256()
+     h.update(msl.encode())
+-    h.update(b'\0mac\0' + MAC_RECORD.encode())
++    h.update(b'\0mac\0' + (MAC_RECORD if BUILD_MAC else 'disabled').encode())
+     h.update(b'\0ios\0' + (ios_metal.RECORD if IOSOUT else '').encode())
+     h.update(b'\0bf-want\0' + (b'1' if key in BF_WANT else b'0'))
+     return h.hexdigest()
+@@ -169,10 +176,10 @@ def bf_cache_root(digest): return os.path.join(CAS, 'variant', digest)
+ 
+ def bf_cache_restore(key, digest, fmeta, fmsl):
+     root = bf_cache_root(digest)
+-    names = ['metal', 'mac.metallib'] + (['ios.metallib'] if IOSOUT else [])
++    names = ['metal'] + (['mac.metallib'] if BUILD_MAC else []) + (['ios.metallib'] if IOSOUT else [])
+     if not all(os.path.exists(os.path.join(root, n)) for n in names): return False
+     clone(os.path.join(root, 'metal'), fmsl)
+-    clone(os.path.join(root, 'mac.metallib'), os.path.join(out, key + '_bf.metallib'))
++    if BUILD_MAC: clone(os.path.join(root, 'mac.metallib'), os.path.join(out, key + '_bf.metallib'))
+     if IOSOUT: clone(os.path.join(root, 'ios.metallib'), os.path.join(IOSOUT, key + '_bf.metallib'))
+     BF_STATS['hit'] += 1
+     return True
+@@ -180,12 +187,12 @@ def bf_cache_restore(key, digest, fmeta, fmsl):
+ def bf_cache_publish(digest, fmsl, maclib, ioslib, fmeta):
+     root = bf_cache_root(digest); os.makedirs(root, exist_ok=True)
+     clone(fmsl, os.path.join(root, 'metal'))
+-    clone(maclib, os.path.join(root, 'mac.metallib'))
++    if BUILD_MAC: clone(maclib, os.path.join(root, 'mac.metallib'))
+     if IOSOUT: clone(ioslib, os.path.join(root, 'ios.metallib'))
+     atomic_json(os.path.join(root, 'fetch.json'), fmeta)
+ 
+ def write_refl(key, refl):
+-    for d, rec in ((out, MAC_RECORD),) + (((IOSOUT, ios_metal.RECORD),) if IOSOUT else ()):
++    for d, rec in ((out, MAC_RECORD if BUILD_MAC else 'source-only'),) + (((IOSOUT, ios_metal.RECORD),) if IOSOUT else ()):
+         value = dict(refl, chain_metal=rec)
+         atomic_json(os.path.join(d, key + '_b.json'), value)
+ 
+@@ -211,10 +218,11 @@ def fetch_finish(key, src, refl):
+                 open(fmsl, 'w').write(fv)
+                 fair = fmsl[:-6] + '.air'; flib = os.path.join(out, key + '_bf.metallib')
+                 try:
+-                    subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', fmsl, '-o', fair], check=True)
+-                    tmp_flib = flib + '.tmp-' + str(os.getpid())
+-                    subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', fair, '-o', tmp_flib], check=True)
+-                    os.replace(tmp_flib, flib)
++                    if BUILD_MAC:
++                        subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', fmsl, '-o', fair], check=True)
++                        tmp_flib = flib + '.tmp-' + str(os.getpid())
++                        subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', fair, '-o', tmp_flib], check=True)
++                        os.replace(tmp_flib, flib)
+                     ilib = None
+                     if IOSOUT:
+                         ilib = os.path.join(IOSOUT, key + '_bf.metallib')
+@@ -255,7 +263,7 @@ def main_rec(mi, o):
      Embedded shader → bytes in the same layout as a package record: in a package record the code area starts at +0x38 (0x30 header + SPH + instructions, marker 78563412), immediately followed by the control segment (34127698);
          the embedded code area sits immediately before the control segment (checked 5: code area length 0x100–0x300, c1 empty in all, consistent with the layout of the same-named package records)"""
      g = mi.rfind(bytes.fromhex('78563412'), o - 0x1000, o)
@@ -3407,7 +3492,7 @@ index a3ca553..2e8c5b1 100644
      return bytes(0x38) + mi[g:o + 0x880]
  
  def job_for(key, name, rec, w):
-@@ -268,7 +270,7 @@ def job_for(key, name, rec, w):
+@@ -268,7 +276,7 @@ def job_for(key, name, rec, w):
          # 只去 0x30 时翻译器从 +0x30 起解码：每 32 字节的控制字位置错开 0x10，间接跳转 BRX 的跳转表（相对程序起点）全部错位 → 粒子 / 后处理计算着色器死循环、GPU 卡死。
          # Compute in this game has a header (magic 0x12345679; D2R's package records have none): 0x30 header + zero padding, instructions start at code area +0x100 (measured on all 71; the BRA-to-self and the control words are 32-byte aligned to this start).
          # Stripping only 0x30 made the translator decode from +0x30: the control word every 32 bytes is off by 0x10 and the jump tables of indirect BRX (relative to the program start) are all misplaced → particle / post-effect compute shaders loop forever and hang the GPU.
@@ -3416,7 +3501,7 @@ index a3ca553..2e8c5b1 100644
          code = code[0x100:]
      cp = os.path.join(w, key + '.bin'); open(cp, 'wb').write(code)
      j = {'key': key, 'stage': stage, 'code': cp, 'tex': {}, 'img': {}, 'attr': {}, 'fout': {}, 'c1': c1.hex(),
-@@ -397,26 +399,18 @@ DRV_FILL = {0: [(b, b + 0x100) for b in sorted(SSBO.values())],   # c0：存储
+@@ -397,26 +405,18 @@ DRV_FILL = {0: [(b, b + 0x100) for b in sorted(SSBO.values())],   # c0：存储
  # c2: texture handle table (Mario 0x20 + 8 r, 32 slots; Engage 0x168 + 8 r, 128 slots), image handle table (0x120 + 8 r, 8 slots), separate sampler handle table (0x568 + 8 r, 128 slots; the replay layer fills them all)
  
  def drv_reads(src):
@@ -3455,7 +3540,7 @@ index a3ca553..2e8c5b1 100644
  
  RULES = []   # 按着色器名挂的 MSL 改写规则（函数, 适用判定）；原有的暗部重映射 toe 已删（回到 Switch 原版亮度） | MSL rewrite rules attached by shader name (function, applicability test); the former dark-range remap toe has been removed (back to the original Switch brightness)
  # 第一段代码指纹不包含 dmsh_fetch.py；可读 tile 变体单独按生成 MSL 做第二段缓存。
-@@ -484,16 +478,16 @@ def finish(key, w, j, c1):
+@@ -484,41 +484,42 @@ def finish(key, w, j, c1):
      name, k = loc[key]
      msl = os.path.join(w, key + '.metal'); air = msl[:-6] + '.air'; lib = os.path.join(out, key + '_b.metallib')
      r = subprocess.run(['spirv-cross', *XC, os.path.join(w, key + '.spv'), '--output', msl], capture_output=True, text=True)
@@ -3475,12 +3560,24 @@ index a3ca553..2e8c5b1 100644
              src = open(msl).read()
      pad = []
      if j['stage'] == 'vs' and PAIRS.get(key):   # 像素着色器读而顶点没写的输出补成 (0,0,0,1)（见 vs_pad） | outputs the pixel shader reads but the vertex shader does not write get (0,0,0,1) (see vs_pad)
-@@ -506,19 +500,19 @@ def finish(key, w, j, c1):
-         subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', air, '-o', tmp_lib], check=True)
-         os.replace(tmp_lib, lib)
-     except subprocess.CalledProcessError as e:
+         src, pad = vs_pad(key, src)
+         if pad: open(msl, 'w').write(src)
+     res = json.load(open(os.path.join(w, key + '.res.json')))
+-    try:
+-        subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', msl, '-o', air], check=True)
+-        tmp_lib = lib + '.tmp-' + str(os.getpid())
+-        subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', air, '-o', tmp_lib], check=True)
+-        os.replace(tmp_lib, lib)
+-    except subprocess.CalledProcessError as e:
 -        return 'metal 失败', str(e)[:160], None
-+        return 'metal failed', str(e)[:160], None
++    if BUILD_MAC:
++        try:
++            subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', msl, '-o', air], check=True)
++            tmp_lib = lib + '.tmp-' + str(os.getpid())
++            subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', air, '-o', tmp_lib], check=True)
++            os.replace(tmp_lib, lib)
++        except subprocess.CalledProcessError as e:
++            return 'metal failed', str(e)[:160], None
      clone(msl, os.path.join(out, key + '_b.metal'))
      if IOSOUT:   # iOS：同一份 MSL 走 iOS 的唯一编译口径（dm/ios/tools/ios_metal.py）出 iphoneos metallib | iOS: the same MSL goes through iOS's single compile convention (dm/ios/tools/ios_metal.py) to produce an iphoneos metallib
          ilib = os.path.join(IOSOUT, key + '_b.metallib')
@@ -3498,7 +3595,7 @@ index a3ca553..2e8c5b1 100644
              'bindings': reflect(key, j['stage'], src, res),
              'vertex_inputs': [{'location': int(m.group(2)), 'msl_type': m.group(1)} for m in re.finditer(r'(\w+)\s+\w+\s*\[\[attribute\((\d+)\)\]\]', src)],
              'raster': raster_facts(j['stage'], src), 'vs_pad': pad}
-@@ -527,6 +521,9 @@ def finish(key, w, j, c1):
+@@ -527,6 +528,9 @@ def finish(key, w, j, c1):
      return 'ok', '', refl
  
  keys = sorted(want) if want else sorted(loc)
@@ -3508,7 +3605,7 @@ index a3ca553..2e8c5b1 100644
  NJ = int(os.environ.get('J', '8'))
  os.makedirs(out, exist_ok=True)
  w = tempfile.mkdtemp(prefix='dmsh_', dir=os.environ.get('WORK'))
-@@ -538,19 +535,19 @@ for key in keys:
+@@ -538,19 +542,19 @@ for key in keys:
          if 'main' not in packs:
              sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../verify'))
              try: import nsoimg
@@ -3532,7 +3629,7 @@ index a3ca553..2e8c5b1 100644
  chunks = [misses[i::NJ] for i in range(NJ)]
  def xl(ch):
      jp = os.path.join(w, f'job_{abs(hash(ch[0]))}.json'); json.dump([jobs[k] for k in ch], open(jp, 'w'))
-@@ -559,37 +556,50 @@ with cf.ThreadPoolExecutor(NJ) as ex: xr = list(ex.map(xl, [c for c in chunks if
+@@ -559,37 +563,51 @@ with cf.ThreadPoolExecutor(NJ) as ex: xr = list(ex.map(xl, [c for c in chunks if
  xerr = {}
  for r in xr:
      for ln in r.stderr.splitlines():
@@ -3562,7 +3659,7 @@ index a3ca553..2e8c5b1 100644
 +        if name not in packs: packs[name] = records(open(os.path.join(dm_dir, name), 'rb').read())
 +        vjob, _ = job_for(vskey, name, packs[name][ordinal], w)
 +        gjobs.append(dict(key=pair['gs'], ps=pair['ps'], vertex=vjob, geometry=jobs[pair['gs']]))
-+    dmsh_geometry.build(gjobs, out, CHAIN, XLATE, ios_output=IOSOUT)
++    dmsh_geometry.build(gjobs, out, CHAIN, XLATE, ios_output=IOSOUT, compile_mac=BUILD_MAC)
 +    print(f'Geometry lowering: {len(gjobs)} VS/GS pairs, {len(gjobs) * 3} Metal programs')
  shutil.rmtree(w, ignore_errors=True)
  st = collections.Counter(r[1] for r in res)
@@ -3593,6 +3690,7 @@ index a3ca553..2e8c5b1 100644
 -for e, n in nt.most_common(8): print(f'  查询无 PC 作答 {n:5d}  {e}')
 +for e, n in nt.most_common(8): print(f'  queries without PC facts {n:5d}  {e}')
  json.dump([{'key': r[0], 'st': r[1], 'err': r[2]} for r in res], open(os.path.join(out, '_b_build.json'), 'w'), ensure_ascii=False)
++if IOSOUT: clone(os.path.join(out, '_b_build.json'), os.path.join(IOSOUT, '_b_build.json'))
 diff --git a/dm/gfx/tools/dmsh_chain.py b/dm/gfx/tools/dmsh_chain.py
 index 14a8e6f..54ddad4 100644
 --- a/dm/gfx/tools/dmsh_chain.py

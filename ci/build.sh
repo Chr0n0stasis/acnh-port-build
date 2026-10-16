@@ -113,18 +113,25 @@ phase_host() {
 
 phase_shaders() {
   local use_cache=1
+  local platform_args=()
+  if [[ "${DM_FULL_CHECKS:-0}" = 1 ]]; then
+    export DMSH_MAC=1
+  else
+    export DMSH_MAC=0
+    platform_args+=(--ios-only)
+  fi
   python3 source/dm/gfx/tools/dmsh_chain.py --check-tools
   if [[ "${DM_LEGACY_CACHE:-0}" = 1 && -f "output/msl-mac/b-$CHAIN/_b_build.json" ]]; then
     python3 ci/reuse_shaders.py "$DM_LEGACY_SHADER_RUN" "$CHAIN"
   fi
   if [[ "$use_cache" = 1 && -f "output/msl-mac/b-$CHAIN/_b_build.json" ]] &&
-     python3 ci/check_shaders.py "output/msl-mac/b-$CHAIN" "output/msl-ios/b-$CHAIN" --bringup; then
+     python3 ci/check_shaders.py "output/msl-mac/b-$CHAIN" "output/msl-ios/b-$CHAIN" --bringup "${platform_args[@]}"; then
     echo "Reusing compiled shader chain $CHAIN; shader compiler skipped"
     printf '{"chain":"%s","source":"matching-chain-cache"}\n' "$CHAIN" > output/shader-reuse.json
   else
     export IOSOUT="$ROOT/output/msl-ios"
     python3 ci/run_shaders.py "$CHAIN"
-    python3 ci/check_shaders.py "output/msl-mac/b-$CHAIN" "output/msl-ios/b-$CHAIN" --bringup
+    python3 ci/check_shaders.py "output/msl-mac/b-$CHAIN" "output/msl-ios/b-$CHAIN" --bringup "${platform_args[@]}"
   fi
   python3 source/dm/gfx/tools/c1_guard.py "output/msl-mac/b-$CHAIN" source/dm/games/acnh/c1_full.tsv
 

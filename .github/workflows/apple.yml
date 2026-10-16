@@ -91,7 +91,7 @@ jobs:
           path: |
             output/msl-mac/b-${{ steps.prepare.outputs.chain }}
             output/msl-ios/b-${{ steps.prepare.outputs.chain }}
-          key: acnh-shaders-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('input-sha256.txt') }}-${{ steps.prepare.outputs.chain }}-${{ hashFiles('source/dm/games/acnh/bf_want.tsv') }}
+          key: acnh-shaders-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('input-sha256.txt') }}-${{ steps.prepare.outputs.chain }}-${{ hashFiles('source/dm/games/acnh/bf_want.tsv') }}-${{ inputs.full_checks && 'macos-ios' || 'ios' }}
       - name: Restore incremental shader compiler cache for changed chains
         if: steps.shader-cache.outputs.cache-hit != 'true' && steps.legacy-cache.outputs.cache-matched-key == ''
         uses: actions/cache/restore@v4

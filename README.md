@@ -14,6 +14,10 @@ Cloud compilation does not establish device compatibility or memory usage.
 The default device iteration skips the macOS host, regression tests, extra syntax
 checks, and ARM64 structure verification. Enable `full_checks` for the host and
 regression suite; enable `verify_rewrite` separately for structural verification.
+The default shader build compiles only iOS Metal libraries (`DMSH_MAC=0`),
+including fragment variants and geometry lowering. Shared MSL and reflection
+metadata are retained for constant-buffer checks. `full_checks` also enables
+macOS Metal compilation. Platform-specific cache keys keep these modes separate.
 The actual iOS compile/link and shader completeness checks still run.
 
 Compiled shaders are restored automatically by translation-chain ID, game-input
